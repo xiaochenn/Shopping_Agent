@@ -68,6 +68,30 @@ class SftCurriculumTest(unittest.TestCase):
                 stop_after_stage="a",
             )
 
+    def test_multi_gpu_prefix_wraps_only_training_command(self):
+        manifest = {
+            "stages": {
+                stage: {"epochs": 1.0, "learning_rate": 1e-4}
+                for stage in ("a", "b", "c")
+            }
+        }
+        commands = build_stage_commands(
+            manifest,
+            manifest_path=Path("manifest.json"),
+            source=Path("all.jsonl"),
+            base_model="base",
+            output_root=Path("outputs"),
+            python="python",
+            stop_after_stage="a",
+            nproc_per_node=2,
+        )
+
+        self.assertEqual(
+            commands[0]["train"][:5],
+            ["python", "-m", "torch.distributed.run", "--nproc_per_node", "2"],
+        )
+        self.assertEqual(commands[0]["merge"][0], "python")
+
 
 if __name__ == "__main__":
     unittest.main()

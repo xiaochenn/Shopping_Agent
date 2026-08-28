@@ -31,6 +31,7 @@ def build_stage_commands(
     qlora=False,
     liger_kernel=False,
     resume_from_checkpoint=None,
+    nproc_per_node=1,
 ):
     start = STAGES.index(start_stage)
     stop = STAGES.index(stop_after_stage)
@@ -46,8 +47,17 @@ def build_stage_commands(
             if stage == "a"
             else str(Path(output_root) / f"stage-{STAGES[STAGES.index(stage) - 1]}" / "merged")
         )
-        train = [
-            str(python),
+        train_prefix = [str(python)]
+        if int(nproc_per_node) > 1:
+            train_prefix.extend(
+                [
+                    "-m",
+                    "torch.distributed.run",
+                    "--nproc_per_node",
+                    str(nproc_per_node),
+                ]
+            )
+        train = train_prefix + [
             str(ROOT / "scripts/train_lora_sft.py"),
             "--model",
             str(model),
@@ -131,12 +141,20 @@ def parse_args():
     parser.add_argument("--swanlab-project", default="shopping-grpo-sft-curriculum")
     parser.add_argument("--qlora", action="store_true")
     parser.add_argument("--liger-kernel", action="store_true")
+    parser.add_argument(
+        "--nproc-per-node",
+        type=int,
+        default=1,
+        help="单机 DDP 进程数；2 表示每个 SFT 阶段使用两张 GPU。",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    if args.nproc_per_node < 1:
+        raise SystemExit("--nproc-per-node 必须至少为 1")
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     if manifest.get("schema_version") != "shopping-sft-curriculum-v1":
         raise SystemExit("不支持的课程清单 schema_version")
@@ -158,6 +176,7 @@ def main():
             qlora=args.qlora,
             liger_kernel=args.liger_kernel,
             resume_from_checkpoint=args.resume_from_checkpoint,
+            nproc_per_node=args.nproc_per_node,
         )
     except (KeyError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
