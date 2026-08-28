@@ -55,7 +55,8 @@ Default recipe:
 | LoRA rank / alpha / dropout | 16 / 32 / 0.05 |
 | Gradient checkpointing | enabled |
 | Attention implementation | SDPA |
-| Saved epoch checkpoints | 3 |
+| Long-sequence loss | Liger fused linear cross-entropy |
+| Checkpointing | Every 50 optimizer steps; retain latest 3 |
 
 SFT is action-level: each source trajectory is replayed into
 `visible prefix -> next tool call` examples. This exactly matches the online

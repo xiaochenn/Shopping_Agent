@@ -32,6 +32,9 @@ class SftCurriculumTest(unittest.TestCase):
         self.assertTrue(commands[2]["merge"][commands[2]["merge"].index("--output") + 1].endswith("stage-c/merged"))
         self.assertIn("--curriculum-manifest", commands[0]["train"])
         self.assertIn("--gradient-checkpointing", commands[0]["train"])
+        self.assertIn("--liger-kernel", commands[0]["train"])
+        save_index = commands[0]["train"].index("--save-steps")
+        self.assertEqual(commands[0]["train"][save_index + 1], "50")
 
     def test_start_and_stop_select_a_contiguous_stage_range(self):
         manifest = {

@@ -89,6 +89,12 @@ def parse_args():
     parser.add_argument("--gradient-checkpointing", action="store_true")
     parser.add_argument("--logging-steps", type=int, default=5)
     parser.add_argument("--save-total-limit", type=int, default=3)
+    parser.add_argument(
+        "--save-steps",
+        type=int,
+        default=0,
+        help="每 N 个优化 step 保存一次 checkpoint；0 表示仅在 epoch 结束时保存。",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--train-count", type=int, default=None)
     parser.add_argument("--train-ratio", type=float, default=None)
@@ -394,6 +400,8 @@ def main():
     args = parse_args()
     if args.max_length < 1 or args.epochs <= 0:
         raise SystemExit("--max-length 与 --epochs 必须为正数")
+    if args.save_steps < 0:
+        raise SystemExit("--save-steps 不能为负数")
     if args.result_clearing and not args.action_level_sft:
         raise SystemExit("--result-clearing 必须与 --action-level-sft 一起使用")
     if args.actions_per_task_per_epoch < 1:
@@ -572,6 +580,16 @@ def main():
         args,
         prepare_model_for_kbit_training=prepare_model_for_kbit_training,
     )
+    if args.liger_kernel:
+        # Transformers 的 ``use_liger_kernel`` 参数不会在这个自定义 Qwen3.5
+        # 加载路径中主动修改模型。显式对已加载实例打补丁，才能让 fused linear
+        # cross-entropy 避免物化 [sequence, vocab] logits，防止长轨迹 OOM。
+        from liger_kernel.transformers import apply_liger_kernel_to_qwen3_5
+
+        if not is_multimodal:
+            raise SystemExit("--liger-kernel 当前仅验证支持 Qwen3.5 模型")
+        apply_liger_kernel_to_qwen3_5(model=model, fused_linear_cross_entropy=True)
+        print("[Liger] applied Qwen3.5 fused linear cross-entropy")
     model = get_peft_model(
         model,
         LoraConfig(
@@ -609,7 +627,8 @@ def main():
         gradient_checkpointing=args.gradient_checkpointing,
         use_liger_kernel=args.liger_kernel,
         logging_steps=args.logging_steps,
-        save_strategy="epoch",
+        save_strategy="steps" if args.save_steps else "epoch",
+        save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
         eval_strategy="epoch" if validation_examples else "no",
         report_to=report_to,

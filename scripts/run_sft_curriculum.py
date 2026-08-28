@@ -29,10 +29,11 @@ def build_stage_commands(
     swanlab=False,
     swanlab_project="shopping-grpo-sft-curriculum",
     qlora=False,
-    liger_kernel=False,
+    liger_kernel=True,
     resume_from_checkpoint=None,
     nproc_per_node=1,
     gradient_accumulation_steps=8,
+    checkpoint_steps=50,
 ):
     start = STAGES.index(start_stage)
     stop = STAGES.index(stop_after_stage)
@@ -42,6 +43,8 @@ def build_stage_commands(
         raise ValueError("--nproc-per-node must be at least 1")
     if gradient_accumulation_steps < 1:
         raise ValueError("--gradient-accumulation-steps must be at least 1")
+    if checkpoint_steps < 1:
+        raise ValueError("--checkpoint-steps must be at least 1")
     if gradient_accumulation_steps % int(nproc_per_node) != 0:
         raise ValueError(
             "--gradient-accumulation-steps must be divisible by --nproc-per-node "
@@ -98,6 +101,8 @@ def build_stage_commands(
             "--gradient-checkpointing",
             "--gradient-accumulation-steps",
             str(per_process_gradient_accumulation_steps),
+            "--save-steps",
+            str(checkpoint_steps),
             "--action-level-sft",
             "--result-clearing",
             "--result-keep-recent-groups",
@@ -156,7 +161,18 @@ def parse_args():
     parser.add_argument("--swanlab", action="store_true")
     parser.add_argument("--swanlab-project", default="shopping-grpo-sft-curriculum")
     parser.add_argument("--qlora", action="store_true")
-    parser.add_argument("--liger-kernel", action="store_true")
+    parser.add_argument(
+        "--liger-kernel",
+        action="store_true",
+        default=True,
+        help="启用 Qwen3.5 fused linear cross-entropy（默认开启）。",
+    )
+    parser.add_argument(
+        "--no-liger-kernel",
+        action="store_false",
+        dest="liger_kernel",
+        help="禁用 Liger；仅用于兼容性排障。",
+    )
     parser.add_argument(
         "--nproc-per-node",
         type=int,
@@ -171,6 +187,12 @@ def parse_args():
             "单卡等效梯度累积步数；多卡时会按进程数等分，以保持全局 batch "
             "和优化步数与单卡一致。"
         ),
+    )
+    parser.add_argument(
+        "--checkpoint-steps",
+        type=int,
+        default=50,
+        help="每个 SFT 阶段每 N 个优化 step 保存可恢复 checkpoint。",
     )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -203,6 +225,7 @@ def main():
             resume_from_checkpoint=args.resume_from_checkpoint,
             nproc_per_node=args.nproc_per_node,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
+            checkpoint_steps=args.checkpoint_steps,
         )
     except (KeyError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
