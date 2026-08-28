@@ -92,6 +92,12 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--train-count", type=int, default=None)
     parser.add_argument("--train-ratio", type=float, default=None)
+    parser.add_argument(
+        "--source-row-limit",
+        type=int,
+        default=None,
+        help="仅用于可控 smoke run：在渲染前稳定限制源轨迹行数。",
+    )
     parser.add_argument("--subset-seed", type=int, default=42)
     parser.add_argument("--resume-from-checkpoint", default=None)
     parser.add_argument("--max-steps", type=int, default=-1, help="最大训练步数（-1=完整 epoch）；用于冒烟测试")
@@ -351,6 +357,10 @@ def _load_preprocessing_components(
 
 def _torch_dataset(examples, torch):
     class TokenizedDataset(torch.utils.data.Dataset):
+        # Samplers may use these stable IDs, but __getitem__ deliberately does
+        # not return them: model.forward must see only tensor inputs.
+        task_ids = [example.get("task_id") for example in examples]
+
         def __len__(self):
             return len(examples)
 
@@ -400,6 +410,10 @@ def main():
         raise SystemExit("--context-input-budget 必须落在模型可用输入窗口内")
     if bool(args.curriculum_manifest) != bool(args.curriculum_stage):
         raise SystemExit("--curriculum-manifest 与 --curriculum-stage 必须一起提供")
+    if args.source_row_limit is not None and args.curriculum_manifest:
+        raise SystemExit("--source-row-limit 不能与课程清单一起使用")
+    if args.source_row_limit is not None and args.source_row_limit < 1:
+        raise SystemExit("--source-row-limit 必须为正数")
     if args.curriculum_manifest and not args.validation:
         raise SystemExit("课程训练必须提供 --validation（通常与 --train 指向同一 Pure V4 文件）")
     train_task_ids = validation_task_ids = None
@@ -492,6 +506,7 @@ def main():
         result_clearing=args.result_clearing,
         result_keep_recent_groups=args.result_keep_recent_groups,
         context_input_budget=args.context_input_budget if args.action_level_sft else None,
+        source_row_limit=args.source_row_limit,
     )
     if train_task_ids is not None and train_stats["matched"] != len(train_task_ids):
         raise SystemExit("课程清单中的训练 task_id 未全部出现在 --train 数据中")
@@ -520,6 +535,7 @@ def main():
             result_clearing=args.result_clearing,
             result_keep_recent_groups=args.result_keep_recent_groups,
             context_input_budget=args.context_input_budget if args.action_level_sft else None,
+            source_row_limit=args.source_row_limit,
         )
         if validation_task_ids is not None and validation_stats["matched"] != len(
             validation_task_ids

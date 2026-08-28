@@ -33,8 +33,9 @@ class TaskUniformActionSampler:
         self.seed = int(seed)
         self.epoch = 0
         groups = {}
+        task_ids = getattr(examples, "task_ids", None)
         for index, example in enumerate(examples):
-            task_id = example.get("task_id")
+            task_id = task_ids[index] if task_ids is not None else example.get("task_id")
             if task_id is None:
                 raise ValueError("task-uniform action sampling requires task_id")
             groups.setdefault(int(task_id), []).append(index)
@@ -279,6 +280,7 @@ def load_supervised_examples(
     result_clearing=False,
     result_keep_recent_groups=3,
     context_input_budget=None,
+    source_row_limit=None,
 ):
     """读取本仓库生成的 SFT JSONL，并报告被模板拒绝的样本数。"""
     try:
@@ -294,8 +296,13 @@ def load_supervised_examples(
     if requested_ids is not None:
         stats["filtered_out"] = 0
         stats["matched"] = 0
+    if source_row_limit is not None and int(source_row_limit) < 1:
+        raise ValueError("source_row_limit must be positive")
     text = Path(path).read_text(encoding="utf-8")
     lines = [l for l in text.splitlines() if l.strip()]
+    if source_row_limit is not None:
+        lines = lines[: int(source_row_limit)]
+        stats["source_row_limit"] = int(source_row_limit)
     stats["total"] = len(lines)
     for line in _tqdm(lines, desc=f"  Tokenizing {Path(path).name}", unit=" samples"):
         try:
