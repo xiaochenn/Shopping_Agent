@@ -84,6 +84,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--context-window", type=int, default=0)
     parser.add_argument("--context-safety-margin", type=int, default=512)
     parser.add_argument("--context-compaction", action="store_true")
+    parser.add_argument(
+        "--result-clearing",
+        action="store_true",
+        help="上下文超预算时先以确定性占位结果清除较早的 tool observation。",
+    )
+    parser.add_argument("--result-keep-recent-groups", type=int, default=3)
     parser.add_argument("--observation-token-budget", type=int, default=0)
     parser.add_argument("--observation-detail-token-budget", type=int, default=4096)
     parser.add_argument("--observation-generic-token-budget", type=int, default=768)
@@ -189,6 +195,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--workers must be at least 1")
     if args.workers > 1 and args.target_accepted is None:
         raise SystemExit("--workers > 1 requires --target-accepted")
+    if args.result_keep_recent_groups < 1:
+        raise SystemExit("--result-keep-recent-groups must be at least 1")
     if not 0 <= args.validation_ratio < 1:
         raise SystemExit("--validation-ratio must be in [0, 1)")
     if not args.build_only and not args.llm_base_url:
@@ -213,6 +221,8 @@ def _make_client(args: argparse.Namespace) -> OpenAIChatClient:
         context_window=args.context_window or None,
         context_safety_margin=args.context_safety_margin,
         context_compaction_enable=args.context_compaction,
+        result_clearing_enable=args.result_clearing,
+        result_keep_recent_groups=args.result_keep_recent_groups,
         observation_token_budget=args.observation_token_budget or None,
         observation_detail_token_budget=args.observation_detail_token_budget,
         observation_generic_token_budget=args.observation_generic_token_budget,
@@ -243,6 +253,8 @@ def _collection_config(args: argparse.Namespace) -> dict:
         "context_window": args.context_window,
         "context_safety_margin": args.context_safety_margin,
         "context_compaction": args.context_compaction,
+        "result_clearing": args.result_clearing,
+        "result_keep_recent_groups": args.result_keep_recent_groups,
         "observation_token_budget": args.observation_token_budget,
         "observation_detail_token_budget": args.observation_detail_token_budget,
         "observation_generic_token_budget": args.observation_generic_token_budget,

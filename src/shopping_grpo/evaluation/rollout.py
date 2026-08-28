@@ -20,6 +20,7 @@ from shopping_grpo.environment.context import (
     ContextBudgetError,
     VllmChatTokenCounter,
     VllmTextTokenCounter,
+    clear_old_tool_results,
     compact_chat_messages,
 )
 from shopping_grpo.environment.projection import project_observation
@@ -71,6 +72,8 @@ class OpenAIChatClient:
         context_window=None,
         context_safety_margin=512,
         context_compaction_enable=False,
+        result_clearing_enable=False,
+        result_keep_recent_groups=3,
         observation_token_budget=None,
         observation_detail_token_budget=4096,
         observation_generic_token_budget=768,
@@ -94,6 +97,10 @@ class OpenAIChatClient:
         self.context_window = int(context_window) if context_window else None
         self.context_safety_margin = int(context_safety_margin)
         self.context_compaction_enable = bool(context_compaction_enable)
+        self.result_clearing_enable = bool(result_clearing_enable)
+        self.result_keep_recent_groups = int(result_keep_recent_groups)
+        if self.result_keep_recent_groups < 1:
+            raise ValueError("result_keep_recent_groups must be positive")
         self.observation_token_budget = (
             int(observation_token_budget) if observation_token_budget else None
         )
@@ -138,19 +145,33 @@ class OpenAIChatClient:
             input_budget = self.context_window - self.max_tokens - self.context_safety_margin
             original_tokens = int(self.token_counter(messages, tools))
             self.last_context_tokens = original_tokens
-            if original_tokens > input_budget:
+            if self.result_clearing_enable and original_tokens > input_budget:
+                request_messages, clearing = clear_old_tool_results(
+                    messages,
+                    keep_recent_groups=self.result_keep_recent_groups,
+                )
+                if clearing.cleared_tool_results:
+                    self.last_context_event = {"result_clearing": clearing.to_dict()}
+            request_tokens = int(self.token_counter(request_messages, tools))
+            if request_tokens > input_budget:
                 if not self.context_compaction_enable:
                     raise ContextBudgetError(
-                        f"prompt uses {original_tokens} tokens, above input budget {input_budget}"
+                        f"prompt uses {request_tokens} tokens, above input budget {input_budget}"
                     )
                 request_messages, stats = compact_chat_messages(
-                    messages,
+                    request_messages,
                     tools,
                     count_tokens=self.token_counter,
                     max_input_tokens=input_budget,
                 )
                 if stats.removed_groups:
-                    self.last_context_event = stats.to_dict()
+                    # Keep the original event shape for group compaction alone;
+                    # trajectory consumers already read these top-level keys.
+                    # When result clearing ran first, retain both audit records.
+                    if self.last_context_event is None:
+                        self.last_context_event = stats.to_dict()
+                    else:
+                        self.last_context_event["group_compaction"] = stats.to_dict()
         if self.responses_api:
             payload = {
                 "model": self.model,

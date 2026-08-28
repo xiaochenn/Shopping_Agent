@@ -769,6 +769,48 @@ class RolloutTest(unittest.TestCase):
         self.assertEqual(client.last_context_event["removed_groups"], 1)
         self.assertEqual(messages[3]["content"], "old page")
 
+    def test_openai_client_clears_old_results_before_fallback_compaction(self):
+        captured = {}
+
+        def transport(url, payload, headers, timeout):
+            captured.update({"payload": payload})
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+        messages = [
+            {"role": "system", "content": "rules"},
+            {"role": "user", "content": "task"},
+            assistant_tool("search_products", {"query": "old"}, "old"),
+            {"role": "tool", "tool_call_id": "old", "name": "search_products", "content": "old page"},
+            assistant_tool("search_products", {"query": "latest"}, "latest"),
+            {"role": "tool", "tool_call_id": "latest", "name": "search_products", "content": "latest page"},
+        ]
+        def token_count(candidate, tools):
+            # The old observation is deliberately expensive.  Replacing it
+            # with a historical placeholder must fit without dropping calls.
+            count = 2
+            for message in candidate:
+                content = str(message.get("content") or "")
+                if content == "old page":
+                    count += 100
+                elif "[SHOPPING_TOOL_RESULT_CLEARED_V1]" in content:
+                    count += 1
+                elif content == "latest page":
+                    count += 1
+            return count
+
+        client = OpenAIChatClient(
+            model="shopping", base_url="http://127.0.0.1:8000/v1", api_key="EMPTY",
+            max_tokens=2, context_window=12, context_safety_margin=1,
+            result_clearing_enable=True, result_keep_recent_groups=1,
+            token_counter=token_count, transport=transport,
+        )
+
+        client.complete(messages, tools=[])
+
+        self.assertIn("[SHOPPING_TOOL_RESULT_CLEARED_V1]", str(captured["payload"]["messages"]))
+        self.assertIn("old", str(captured["payload"]["messages"]))
+        self.assertEqual(client.last_context_event["result_clearing"]["cleared_tool_results"], 1)
+
     def test_openai_client_projects_tool_observation_with_serving_tokenizer(self):
         client = OpenAIChatClient(
             model="shopping",

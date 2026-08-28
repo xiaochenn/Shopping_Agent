@@ -41,6 +41,12 @@ def parse_args():
         help="上下文接近上限时压缩较早的交互；默认关闭。",
     )
     parser.add_argument(
+        "--result-clearing",
+        action="store_true",
+        help="超预算时先将较早 tool result 改为确定性占位结果。",
+    )
+    parser.add_argument("--result-keep-recent-groups", type=int, default=3)
+    parser.add_argument(
         "--observation-token-budget",
         type=int,
         default=1536,
@@ -70,6 +76,8 @@ def main():
         raise SystemExit("--context-window 不能为负数")
     if args.context_window and args.context_window <= args.max_tokens + args.context_safety_margin:
         raise SystemExit("--context-window 必须大于 --max-tokens 与安全余量之和")
+    if args.result_keep_recent_groups < 1:
+        raise SystemExit("--result-keep-recent-groups 必须至少为 1")
     if args.observation_token_budget < 0:
         raise SystemExit("--observation-token-budget 不能为负数")
     tasks = load_tasks(args.benchmark)
@@ -84,6 +92,8 @@ def main():
         context_window=args.context_window,
         context_safety_margin=args.context_safety_margin,
         context_compaction_enable=args.context_compaction,
+        result_clearing_enable=args.result_clearing,
+        result_keep_recent_groups=args.result_keep_recent_groups,
         observation_token_budget=args.observation_token_budget,
         observation_detail_token_budget=args.observation_detail_token_budget,
         observation_generic_token_budget=args.observation_generic_token_budget,
@@ -110,6 +120,8 @@ def main():
         "context_window": args.context_window,
         "context_safety_margin": args.context_safety_margin,
         "context_compaction": args.context_compaction,
+        "result_clearing": args.result_clearing,
+        "result_keep_recent_groups": args.result_keep_recent_groups,
         "observation_token_budget": args.observation_token_budget,
         "observation_detail_token_budget": args.observation_detail_token_budget,
         "observation_generic_token_budget": args.observation_generic_token_budget,
