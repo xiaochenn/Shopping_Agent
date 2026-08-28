@@ -91,6 +91,28 @@ class SftCurriculumTest(unittest.TestCase):
             ["python", "-m", "torch.distributed.run", "--nproc_per_node", "2"],
         )
         self.assertEqual(commands[0]["merge"][0], "python")
+        accumulation_index = commands[0]["train"].index("--gradient-accumulation-steps")
+        self.assertEqual(commands[0]["train"][accumulation_index + 1], "4")
+
+    def test_multi_gpu_requires_divisible_accumulation(self):
+        manifest = {
+            "stages": {
+                stage: {"epochs": 1.0, "learning_rate": 1e-4}
+                for stage in ("a", "b", "c")
+            }
+        }
+        with self.assertRaisesRegex(ValueError, "divisible"):
+            build_stage_commands(
+                manifest,
+                manifest_path=Path("manifest.json"),
+                source=Path("all.jsonl"),
+                base_model="base",
+                output_root=Path("outputs"),
+                python="python",
+                stop_after_stage="a",
+                nproc_per_node=3,
+                gradient_accumulation_steps=8,
+            )
 
 
 if __name__ == "__main__":

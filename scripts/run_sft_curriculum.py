@@ -32,11 +32,25 @@ def build_stage_commands(
     liger_kernel=False,
     resume_from_checkpoint=None,
     nproc_per_node=1,
+    gradient_accumulation_steps=8,
 ):
     start = STAGES.index(start_stage)
     stop = STAGES.index(stop_after_stage)
     if stop < start:
         raise ValueError("--stop-after-stage must be at or after --start-stage")
+    if int(nproc_per_node) < 1:
+        raise ValueError("--nproc-per-node must be at least 1")
+    if gradient_accumulation_steps < 1:
+        raise ValueError("--gradient-accumulation-steps must be at least 1")
+    if gradient_accumulation_steps % int(nproc_per_node) != 0:
+        raise ValueError(
+            "--gradient-accumulation-steps must be divisible by --nproc-per-node "
+            "to preserve the single-GPU global batch size"
+        )
+
+    per_process_gradient_accumulation_steps = (
+        gradient_accumulation_steps // int(nproc_per_node)
+    )
 
     commands = []
     for index, stage in enumerate(STAGES[start : stop + 1]):
@@ -82,6 +96,8 @@ def build_stage_commands(
             "--attention-implementation",
             "sdpa",
             "--gradient-checkpointing",
+            "--gradient-accumulation-steps",
+            str(per_process_gradient_accumulation_steps),
             "--action-level-sft",
             "--result-clearing",
             "--result-keep-recent-groups",
@@ -147,6 +163,15 @@ def parse_args():
         default=1,
         help="单机 DDP 进程数；2 表示每个 SFT 阶段使用两张 GPU。",
     )
+    parser.add_argument(
+        "--gradient-accumulation-steps",
+        type=int,
+        default=8,
+        help=(
+            "单卡等效梯度累积步数；多卡时会按进程数等分，以保持全局 batch "
+            "和优化步数与单卡一致。"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -177,6 +202,7 @@ def main():
             liger_kernel=args.liger_kernel,
             resume_from_checkpoint=args.resume_from_checkpoint,
             nproc_per_node=args.nproc_per_node,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
         )
     except (KeyError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
