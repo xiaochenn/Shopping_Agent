@@ -8,11 +8,16 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import re
 from urllib.request import Request, urlopen
 
 
 class ContextBudgetError(RuntimeError):
     """The required prompt and latest environment state do not fit the configured budget."""
+
+
+RESULT_CLEARING_VERSION = "shopping-result-clearing-v1"
+_OBSERVATION_FIELD_PATTERN = re.compile(r"^([a-z_]+):\s*(.*)$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -25,6 +30,101 @@ class ContextWindowStats:
 
     def to_dict(self) -> dict[str, int]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class ToolResultClearingStats:
+    """Audit record for deterministic historical tool-result clearing."""
+
+    cleared_tool_results: int
+    kept_recent_groups: int
+
+    def to_dict(self) -> dict[str, int | str]:
+        return {"version": RESULT_CLEARING_VERSION, **asdict(self)}
+
+
+def tool_result_placeholder(tool_name, observation):
+    """Return a compact, non-actionable memory of an old tool result.
+
+    The original assistant tool call stays in history.  The replacement is a
+    valid tool response rather than an arbitrary token splice, and only keeps
+    stable facts that can help comparison later.  In particular it never
+    reproduces historic buttons or search-result ASIN lists, because neither is
+    a legal action target outside the latest observation.
+    """
+
+    fields = _observation_fields(observation)
+    lines = [
+        "[SHOPPING_TOOL_RESULT_CLEARED_V1]",
+        f"tool: {tool_name or 'unknown'}",
+        "status: historical result cleared to satisfy the context budget.",
+        "The original tool call is retained. This record is historical and has no actionable buttons.",
+    ]
+    for key in ("query", "asin", "title", "brand", "category", "price", "selected_options", "key_attributes"):
+        value = fields.get(key)
+        if value:
+            lines.append(f"{key}: {_short_field(value)}")
+    return "\n".join(lines)
+
+
+def clear_old_tool_results(messages, keep_recent_groups=3):
+    """Replace old tool observations while preserving every assistant call.
+
+    This is intentionally milder than dropping old interaction groups.  It is
+    usable by message-based API rollouts and SFT replay.  Token-based veRL
+    rollouts use the same ``tool_result_placeholder`` payload after locating a
+    complete tool-message span.
+    """
+
+    keep_recent_groups = int(keep_recent_groups)
+    if keep_recent_groups < 1:
+        raise ValueError("keep_recent_groups must be positive")
+    original = [dict(message) for message in messages]
+    anchor, groups = _split_chat_tool_groups(original)
+    if len(groups) <= keep_recent_groups:
+        return original, ToolResultClearingStats(0, len(groups))
+
+    cleared = 0
+    rewritten = []
+    for group_index, group in enumerate(groups):
+        copied_group = []
+        should_clear = group_index < len(groups) - keep_recent_groups
+        for message in group:
+            copied = dict(message)
+            if should_clear and copied.get("role") == "tool":
+                copied["content"] = tool_result_placeholder(
+                    copied.get("name") or _tool_name_from_group(group),
+                    copied.get("content"),
+                )
+                cleared += 1
+            copied_group.append(copied)
+        rewritten.append(copied_group)
+    return anchor + _flatten(rewritten), ToolResultClearingStats(
+        cleared, min(keep_recent_groups, len(groups))
+    )
+
+
+def _tool_name_from_group(group):
+    assistant = group[0] if group else {}
+    calls = assistant.get("tool_calls") or []
+    if len(calls) != 1:
+        return "unknown"
+    return str(((calls[0].get("function") or {}).get("name")) or "unknown")
+
+
+def _observation_fields(observation):
+    if not isinstance(observation, str):
+        return {}
+    return {
+        key: value.strip()
+        for key, value in _OBSERVATION_FIELD_PATTERN.findall(observation)
+        if value.strip()
+    }
+
+
+def _short_field(value, limit=240):
+    value = " ".join(str(value).split())
+    return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
 def compact_chat_messages(messages, tools, count_tokens, max_input_tokens):

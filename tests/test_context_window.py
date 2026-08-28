@@ -5,8 +5,10 @@ import unittest
 from shopping_grpo.environment.context import (
     ContextBudgetError,
     VllmChatTokenCounter,
+    clear_old_tool_results,
     compact_chat_messages,
     compact_token_trajectory,
+    tool_result_placeholder,
 )
 
 
@@ -34,6 +36,39 @@ def tool(call_id, content):
 
 
 class ChatContextWindowTest(unittest.TestCase):
+    def test_result_clearing_preserves_calls_and_latest_full_result(self):
+        messages = [
+            {"role": "system", "content": "rules"},
+            {"role": "user", "content": "task"},
+            assistant("old"),
+            tool(
+                "old",
+                "[SHOPPING_OBSERVATION_V2]\npage_type: product_detail\nasin: 123\ntitle: very long old title\nprice: 10\n可点击的按钮: [\"123\", \"buy now\"]",
+            ),
+            assistant("latest"),
+            tool("latest", "latest page with the current actionable buttons"),
+        ]
+
+        cleared, stats = clear_old_tool_results(messages, keep_recent_groups=1)
+
+        self.assertEqual(stats.cleared_tool_results, 1)
+        self.assertEqual(cleared[2], assistant("old"))
+        self.assertEqual(cleared[4], assistant("latest"))
+        self.assertIn("[SHOPPING_TOOL_RESULT_CLEARED_V1]", cleared[3]["content"])
+        self.assertIn("asin: 123", cleared[3]["content"])
+        self.assertNotIn('"buy now"', cleared[3]["content"])
+        self.assertEqual(cleared[5]["content"], "latest page with the current actionable buttons")
+        self.assertIn('"buy now"', messages[3]["content"])
+
+    def test_result_placeholder_has_no_unstructured_button_payload(self):
+        placeholder = tool_result_placeholder(
+            "search_products",
+            "[SHOPPING_OBSERVATION_V2]\nquery: red shoes\n可点击的按钮: [\"123\", \"next >\"]",
+        )
+        self.assertIn("query: red shoes", placeholder)
+        self.assertIn("no actionable buttons", placeholder)
+        self.assertNotIn("next >", placeholder)
+
     def test_keeps_fixed_prompt_and_largest_recent_complete_group_suffix(self):
         messages = [
             {"role": "system", "content": "rules"},
