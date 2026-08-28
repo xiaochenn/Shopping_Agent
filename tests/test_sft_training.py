@@ -7,6 +7,7 @@ from pathlib import Path
 
 from shopping_grpo.training.sft.dataset import (
     IGNORE_INDEX,
+    build_action_supervised_examples,
     build_supervised_example,
     load_supervised_examples,
     normalize_messages_for_chat_template,
@@ -191,6 +192,52 @@ class SftTrainingTest(unittest.TestCase):
             messages[0]["tool_calls"][0]["function"]["arguments"],
             '{"query":"pillow"}',
         )
+
+    def test_action_level_examples_train_one_tool_call_at_a_time(self):
+        """末尾自然语言不应成为工具 Agent 的 SFT 目标。"""
+        messages = [
+            {"role": "user", "content": "buy"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call-1", "function": {"name": "search_products", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "name": "search_products", "content": "old-result " + "x" * 600},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call-2", "function": {"name": "open_product", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "call-2", "name": "open_product", "content": "latest-result"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call-3", "function": {"name": "buy_now", "arguments": "{}"}}],
+            },
+            {"role": "tool", "content": "购买已完成。"},
+            {"role": "assistant", "content": "已为你完成购买。"},
+        ]
+
+        examples = build_action_supervised_examples(
+            messages=messages,
+            tools=[],
+            tokenizer=CharacterTokenizer(),
+            max_length=2_000,
+            result_clearing=True,
+            result_keep_recent_groups=1,
+            context_input_budget=300,
+        )
+
+        self.assertEqual(len(examples), 3)
+        self.assertEqual([row["action_count"] for row in examples], [3, 3, 3])
+        self.assertEqual(examples[-1]["cleared_tool_results"], 1)
+        rendered = CharacterTokenizer.decode(examples[-1]["input_ids"])
+        self.assertIn("[SHOPPING_TOOL_RESULT_CLEARED_V1]", rendered)
+        labeled = CharacterTokenizer.decode(
+            token for token in examples[-1]["labels"] if token != IGNORE_INDEX
+        )
+        self.assertIn("[tool=buy_now]", labeled)
+        self.assertNotIn("已为你完成购买", labeled)
 
     def test_loader_keeps_valid_rows_and_reports_dropped_rows(self):
         """训练前必须看得到 JSONL 中哪些行不能被目标模板训练。"""

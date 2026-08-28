@@ -10,6 +10,8 @@ import hashlib
 from copy import deepcopy
 from pathlib import Path
 
+from shopping_grpo.environment.context import clear_old_tool_results
+
 
 IGNORE_INDEX = -100
 
@@ -126,12 +128,116 @@ def build_supervised_example(messages, tools, tokenizer, max_length=8192, chat_t
     }
 
 
+def build_action_supervised_examples(
+    messages,
+    tools,
+    tokenizer,
+    max_length=8192,
+    chat_template=None,
+    *,
+    result_clearing=False,
+    result_keep_recent_groups=3,
+    context_input_budget=None,
+):
+    """Build one tool-call target per turn under the rollout context policy.
+
+    Each returned example ends at exactly one assistant tool call.  It therefore
+    trains the same decision boundary used by an online agent: all preceding
+    messages are context, and only the immediate next action receives loss.
+    When enabled, result clearing is applied to that *prefix* only after it
+    exceeds the online input budget.  No model call or mutable dataset is
+    involved, so the transform is deterministic and replayable for SFT.
+    """
+
+    template = chat_template or tokenizer
+    rendered_messages = normalize_messages_for_chat_template(messages)
+    if rendered_messages is None:
+        return []
+    if result_clearing and context_input_budget is None:
+        raise ValueError("context_input_budget is required with result_clearing")
+    if context_input_budget is not None and int(context_input_budget) < 1:
+        raise ValueError("context_input_budget must be positive")
+
+    examples = []
+    target_indices = [
+        index
+        for index, message in enumerate(rendered_messages)
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    ]
+    for action_index, target_index in enumerate(target_indices):
+        prefix = rendered_messages[:target_index]
+        cleared_count = 0
+        try:
+            prefix_text = template.apply_chat_template(
+                prefix,
+                tools=tools,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            prefix_ids = _token_ids(tokenizer, prefix_text)
+        except Exception:
+            continue
+
+        if result_clearing and len(prefix_ids) > int(context_input_budget):
+            prefix, clearing = clear_old_tool_results(
+                prefix,
+                keep_recent_groups=result_keep_recent_groups,
+            )
+            cleared_count = clearing.cleared_tool_results
+            try:
+                prefix_text = template.apply_chat_template(
+                    prefix,
+                    tools=tools,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                prefix_ids = _token_ids(tokenizer, prefix_text)
+            except Exception:
+                continue
+
+        try:
+            through_text = template.apply_chat_template(
+                prefix + [rendered_messages[target_index]],
+                tools=tools,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            input_ids = _token_ids(tokenizer, through_text)
+        except Exception:
+            continue
+        if len(input_ids) > int(max_length):
+            continue
+
+        # Keep the existing template-tolerant boundary rule.  It handles
+        # templates whose generation prompt differs by a tiny suffix.
+        start = _common_prefix_length(prefix_ids, input_ids)
+        if start >= len(input_ids):
+            continue
+        labels = [IGNORE_INDEX] * len(input_ids)
+        labels[start:] = input_ids[start:]
+        examples.append(
+            {
+                "input_ids": input_ids,
+                "attention_mask": [1] * len(input_ids),
+                "labels": labels,
+                "action_index": action_index,
+                "action_count": len(target_indices),
+                "cleared_tool_results": cleared_count,
+            }
+        )
+    return examples
+
+
 def load_supervised_examples(
     path,
     tokenizer,
     max_length=8192,
     chat_template=None,
     task_ids=None,
+    action_level=False,
+    result_clearing=False,
+    result_keep_recent_groups=3,
+    context_input_budget=None,
 ):
     """读取本仓库生成的 SFT JSONL，并报告被模板拒绝的样本数。"""
     try:
@@ -141,6 +247,8 @@ def load_supervised_examples(
 
     examples = []
     stats = {"total": 0, "kept": 0, "dropped": 0}
+    if action_level:
+        stats.update({"tool_action_targets": 0, "cleared_action_targets": 0})
     requested_ids = {int(task_id) for task_id in task_ids} if task_ids is not None else None
     if requested_ids is not None:
         stats["filtered_out"] = 0
@@ -156,6 +264,30 @@ def load_supervised_examples(
                 continue
             if requested_ids is not None:
                 stats["matched"] += 1
+            if action_level:
+                action_examples = build_action_supervised_examples(
+                    messages=row["messages"],
+                    tools=row.get("tools") or [],
+                    tokenizer=tokenizer,
+                    max_length=max_length,
+                    chat_template=chat_template,
+                    result_clearing=result_clearing,
+                    result_keep_recent_groups=result_keep_recent_groups,
+                    context_input_budget=context_input_budget,
+                )
+                stats["tool_action_targets"] += len(action_examples)
+                stats["cleared_action_targets"] += sum(
+                    example["cleared_tool_results"] > 0 for example in action_examples
+                )
+                if not action_examples:
+                    stats["dropped"] += 1
+                    continue
+                for example in action_examples:
+                    example["task_id"] = row.get("task_id")
+                    example["trajectory_id"] = row.get("trajectory_id")
+                    examples.append(example)
+                    stats["kept"] += 1
+                continue
             example = build_supervised_example(
                 messages=row["messages"],
                 tools=row.get("tools") or [],

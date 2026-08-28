@@ -94,6 +94,20 @@ def parse_args():
     parser.add_argument("--subset-seed", type=int, default=42)
     parser.add_argument("--resume-from-checkpoint", default=None)
     parser.add_argument("--max-steps", type=int, default=-1, help="最大训练步数（-1=完整 epoch）；用于冒烟测试")
+    parser.add_argument(
+        "--action-level-sft",
+        action="store_true",
+        help="每次 assistant tool call 生成一条训练样本，使 SFT 输入与在线 rollout 对齐。",
+    )
+    parser.add_argument(
+        "--result-clearing",
+        action="store_true",
+        help="仅与 --action-level-sft 一起使用；超出在线输入预算时清空较早 tool result。",
+    )
+    parser.add_argument("--result-keep-recent-groups", type=int, default=3)
+    parser.add_argument("--rollout-context-window", type=int, default=24576)
+    parser.add_argument("--rollout-max-tokens", type=int, default=512)
+    parser.add_argument("--rollout-context-safety-margin", type=int, default=512)
     parser.add_argument("--swanlab", action="store_true", help="启用 SwanLab 训练监控")
     parser.add_argument("--swanlab-project", default="shopping-grpo", help="SwanLab project 名")
     parser.add_argument("--swanlab-run-name", default=None, help="SwanLab run 名；默认自动生成")
@@ -340,6 +354,12 @@ def main():
     args = parse_args()
     if args.max_length < 1 or args.epochs <= 0:
         raise SystemExit("--max-length 与 --epochs 必须为正数")
+    if args.result_clearing and not args.action_level_sft:
+        raise SystemExit("--result-clearing 必须与 --action-level-sft 一起使用")
+    if args.result_keep_recent_groups < 1:
+        raise SystemExit("--result-keep-recent-groups 必须至少为 1")
+    if args.rollout_context_window <= args.rollout_max_tokens + args.rollout_context_safety_margin:
+        raise SystemExit("--rollout-context-window 必须大于输出上限与安全余量之和")
     if bool(args.curriculum_manifest) != bool(args.curriculum_stage):
         raise SystemExit("--curriculum-manifest 与 --curriculum-stage 必须一起提供")
     if args.curriculum_manifest and not args.validation:
@@ -430,6 +450,14 @@ def main():
         chat_template=chat_template,
         max_length=args.max_length,
         task_ids=train_task_ids,
+        action_level=args.action_level_sft,
+        result_clearing=args.result_clearing,
+        result_keep_recent_groups=args.result_keep_recent_groups,
+        context_input_budget=(
+            args.rollout_context_window
+            - args.rollout_max_tokens
+            - args.rollout_context_safety_margin
+        ) if args.action_level_sft else None,
     )
     if train_task_ids is not None and train_stats["matched"] != len(train_task_ids):
         raise SystemExit("课程清单中的训练 task_id 未全部出现在 --train 数据中")
@@ -454,6 +482,14 @@ def main():
             chat_template=chat_template,
             max_length=args.max_length,
             task_ids=validation_task_ids,
+            action_level=args.action_level_sft,
+            result_clearing=args.result_clearing,
+            result_keep_recent_groups=args.result_keep_recent_groups,
+            context_input_budget=(
+                args.rollout_context_window
+                - args.rollout_max_tokens
+                - args.rollout_context_safety_margin
+            ) if args.action_level_sft else None,
         )
         if validation_task_ids is not None and validation_stats["matched"] != len(
             validation_task_ids
