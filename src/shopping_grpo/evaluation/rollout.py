@@ -71,6 +71,7 @@ class OpenAIChatClient:
         reasoning_effort="high",
         context_window=None,
         context_safety_margin=512,
+        context_input_budget=None,
         context_compaction_enable=False,
         result_clearing_enable=False,
         result_keep_recent_groups=3,
@@ -96,6 +97,9 @@ class OpenAIChatClient:
         self.reasoning_effort = reasoning_effort
         self.context_window = int(context_window) if context_window else None
         self.context_safety_margin = int(context_safety_margin)
+        self.context_input_budget = (
+            int(context_input_budget) if context_input_budget else None
+        )
         self.context_compaction_enable = bool(context_compaction_enable)
         self.result_clearing_enable = bool(result_clearing_enable)
         self.result_keep_recent_groups = int(result_keep_recent_groups)
@@ -110,6 +114,11 @@ class OpenAIChatClient:
         if self.context_window is not None:
             if self.context_window <= self.max_tokens + self.context_safety_margin:
                 raise ValueError("context_window must exceed max_tokens plus context_safety_margin")
+            max_input_budget = (
+                self.context_window - self.max_tokens - self.context_safety_margin
+            )
+            if self.context_input_budget is not None and not 0 < self.context_input_budget <= max_input_budget:
+                raise ValueError("context_input_budget must fit the model context window")
             self.token_counter = token_counter or VllmChatTokenCounter(
                 model=self.model,
                 base_url=self.base_url,
@@ -142,7 +151,13 @@ class OpenAIChatClient:
         self.last_context_tokens = None
         request_messages = messages
         if self.context_window is not None:
-            input_budget = self.context_window - self.max_tokens - self.context_safety_margin
+            max_input_budget = self.context_window - self.max_tokens - self.context_safety_margin
+            input_budget = (
+                self.context_input_budget
+                if (self.result_clearing_enable or self.context_compaction_enable)
+                and self.context_input_budget is not None
+                else max_input_budget
+            )
             original_tokens = int(self.token_counter(messages, tools))
             self.last_context_tokens = original_tokens
             if self.result_clearing_enable and original_tokens > input_budget:

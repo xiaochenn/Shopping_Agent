@@ -212,7 +212,8 @@ LLM Judge 之前先进行确定性预处理：
 4. 计算工具次数、步数、候选打开数和购买/放弃次数；
 5. 检查 malformed tool call、Action Guard 拒绝、step error 和非法动作；
 6. 统计重复动作、重复搜索和 environment repeat loop；
-7. 统计 Observation 投影、截断、上下文 token 和 overflow；
+7. 统计 Observation 投影、截断、上下文 token 和 overflow；当输入超过 16,384
+   token 时，保留最近 3 个完整 tool result，将更早 result 替换为不可点击的确定性占位符；
 8. 检查 release error、任务缺失及其他 `infrastructure_invalid` 情况。
 
 如果轨迹被判为 `infrastructure_invalid`，系统直接生成 `not_judged`，不会要求 Pro

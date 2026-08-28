@@ -10,6 +10,7 @@ from pathlib import Path
 from shopping_grpo.evaluation.artifacts import ArtifactError
 from shopping_grpo.evaluation.blind_guard import guard_blind_final
 from shopping_grpo.training.sft.dataset import (
+    TaskUniformActionSampler,
     load_supervised_examples,
     select_training_examples,
 )
@@ -108,6 +109,18 @@ def parse_args():
     parser.add_argument("--rollout-context-window", type=int, default=24576)
     parser.add_argument("--rollout-max-tokens", type=int, default=512)
     parser.add_argument("--rollout-context-safety-margin", type=int, default=512)
+    parser.add_argument(
+        "--context-input-budget",
+        type=int,
+        default=16384,
+        help="与 GRPO Harness 一致的目标输入 token 预算。",
+    )
+    parser.add_argument(
+        "--actions-per-task-per-epoch",
+        type=int,
+        default=4,
+        help="action-level SFT 中每个源任务每 epoch 采样的工具动作数，防止长轨迹过度加权。",
+    )
     parser.add_argument("--swanlab", action="store_true", help="启用 SwanLab 训练监控")
     parser.add_argument("--swanlab-project", default="shopping-grpo", help="SwanLab project 名")
     parser.add_argument("--swanlab-run-name", default=None, help="SwanLab run 名；默认自动生成")
@@ -260,7 +273,12 @@ def _swanlab_config(args):
     return "swanlab", run_name
 
 
-def _loss_only_eval_trainer_class(trainer_base, enable_skip_logits):
+def _loss_only_eval_trainer_class(
+    trainer_base,
+    enable_skip_logits,
+    task_uniform_action_sampling=False,
+    actions_per_task_per_epoch=4,
+):
     """构造只在 loss-only 验证时显式跳过完整词表 logits 的 Trainer。
 
     Qwen3.5 的 Liger forward 默认只在 ``model.training`` 时启用融合
@@ -274,6 +292,18 @@ def _loss_only_eval_trainer_class(trainer_base, enable_skip_logits):
     """
 
     class LossOnlyEvalTrainer(trainer_base):
+        def _get_train_sampler(self, train_dataset=None):
+            if task_uniform_action_sampling:
+                return TaskUniformActionSampler(
+                    train_dataset or self.train_dataset,
+                    actions_per_task=actions_per_task_per_epoch,
+                    seed=self.args.seed,
+                )
+            try:
+                return super()._get_train_sampler(train_dataset)
+            except TypeError:
+                return super()._get_train_sampler()
+
         def prediction_step(
             self,
             model,
@@ -356,10 +386,18 @@ def main():
         raise SystemExit("--max-length 与 --epochs 必须为正数")
     if args.result_clearing and not args.action_level_sft:
         raise SystemExit("--result-clearing 必须与 --action-level-sft 一起使用")
+    if args.actions_per_task_per_epoch < 1:
+        raise SystemExit("--actions-per-task-per-epoch 必须至少为 1")
     if args.result_keep_recent_groups < 1:
         raise SystemExit("--result-keep-recent-groups 必须至少为 1")
     if args.rollout_context_window <= args.rollout_max_tokens + args.rollout_context_safety_margin:
         raise SystemExit("--rollout-context-window 必须大于输出上限与安全余量之和")
+    if not 0 < args.context_input_budget <= (
+        args.rollout_context_window
+        - args.rollout_max_tokens
+        - args.rollout_context_safety_margin
+    ):
+        raise SystemExit("--context-input-budget 必须落在模型可用输入窗口内")
     if bool(args.curriculum_manifest) != bool(args.curriculum_stage):
         raise SystemExit("--curriculum-manifest 与 --curriculum-stage 必须一起提供")
     if args.curriculum_manifest and not args.validation:
@@ -453,11 +491,7 @@ def main():
         action_level=args.action_level_sft,
         result_clearing=args.result_clearing,
         result_keep_recent_groups=args.result_keep_recent_groups,
-        context_input_budget=(
-            args.rollout_context_window
-            - args.rollout_max_tokens
-            - args.rollout_context_safety_margin
-        ) if args.action_level_sft else None,
+        context_input_budget=args.context_input_budget if args.action_level_sft else None,
     )
     if train_task_ids is not None and train_stats["matched"] != len(train_task_ids):
         raise SystemExit("课程清单中的训练 task_id 未全部出现在 --train 数据中")
@@ -485,11 +519,7 @@ def main():
             action_level=args.action_level_sft,
             result_clearing=args.result_clearing,
             result_keep_recent_groups=args.result_keep_recent_groups,
-            context_input_budget=(
-                args.rollout_context_window
-                - args.rollout_max_tokens
-                - args.rollout_context_safety_margin
-            ) if args.action_level_sft else None,
+            context_input_budget=args.context_input_budget if args.action_level_sft else None,
         )
         if validation_task_ids is not None and validation_stats["matched"] != len(
             validation_task_ids
@@ -575,6 +605,8 @@ def main():
     trainer_class = _loss_only_eval_trainer_class(
         Trainer,
         enable_skip_logits=args.liger_kernel and is_multimodal,
+        task_uniform_action_sampling=args.action_level_sft,
+        actions_per_task_per_epoch=args.actions_per_task_per_epoch,
     )
     trainer = trainer_class(
         model=model,
@@ -611,6 +643,12 @@ def main():
             "liger_kernel": args.liger_kernel,
             "attention_implementation": args.attention_implementation,
             "qlora": args.qlora,
+        },
+        "sampling": {
+            "action_level_sft": args.action_level_sft,
+            "actions_per_task_per_epoch": (
+                args.actions_per_task_per_epoch if args.action_level_sft else None
+            ),
         },
         "arguments": vars(args),
     }

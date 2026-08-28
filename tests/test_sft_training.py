@@ -7,6 +7,7 @@ from pathlib import Path
 
 from shopping_grpo.training.sft.dataset import (
     IGNORE_INDEX,
+    TaskUniformActionSampler,
     build_action_supervised_examples,
     build_supervised_example,
     load_supervised_examples,
@@ -238,6 +239,23 @@ class SftTrainingTest(unittest.TestCase):
         )
         self.assertIn("[tool=buy_now]", labeled)
         self.assertNotIn("已为你完成购买", labeled)
+
+    def test_task_uniform_action_sampler_does_not_overweight_long_trajectories(self):
+        examples = [
+            {"task_id": 1, "action_index": index}
+            for index in range(8)
+        ] + [
+            {"task_id": 2, "action_index": index}
+            for index in range(2)
+        ]
+        sampler = TaskUniformActionSampler(examples, actions_per_task=3, seed=7)
+        selected = list(sampler)
+        task_ids = [examples[index]["task_id"] for index in selected]
+
+        self.assertEqual(len(selected), 6)
+        self.assertEqual(task_ids.count(1), 3)
+        self.assertEqual(task_ids.count(2), 3)
+        self.assertEqual(selected, list(TaskUniformActionSampler(examples, actions_per_task=3, seed=7)))
 
     def test_loader_keeps_valid_rows_and_reports_dropped_rows(self):
         """训练前必须看得到 JSONL 中哪些行不能被目标模板训练。"""

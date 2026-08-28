@@ -7,6 +7,7 @@
 
 import json
 import hashlib
+import random
 from copy import deepcopy
 from pathlib import Path
 
@@ -14,6 +15,46 @@ from shopping_grpo.environment.context import clear_old_tool_results
 
 
 IGNORE_INDEX = -100
+
+
+class TaskUniformActionSampler:
+    """Sample an equal number of action targets from each source task per epoch.
+
+    Turn-level SFT is necessary for rollout-aligned context, but naively using
+    every turn makes a 33-step task contribute 33 times the gradient of a
+    short task.  This sampler keeps task-level weighting stable while drawing
+    a different in-trajectory action each epoch deterministically by seed.
+    """
+
+    def __init__(self, examples, actions_per_task=4, seed=42):
+        self.actions_per_task = int(actions_per_task)
+        if self.actions_per_task < 1:
+            raise ValueError("actions_per_task must be positive")
+        self.seed = int(seed)
+        self.epoch = 0
+        groups = {}
+        for index, example in enumerate(examples):
+            task_id = example.get("task_id")
+            if task_id is None:
+                raise ValueError("task-uniform action sampling requires task_id")
+            groups.setdefault(int(task_id), []).append(index)
+        self.groups = dict(sorted(groups.items()))
+
+    def __len__(self):
+        return len(self.groups) * self.actions_per_task
+
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        rng = random.Random(f"{self.seed}:{self.epoch}")
+        selected = [
+            rng.choice(indices)
+            for task_id, indices in self.groups.items()
+            for _ in range(self.actions_per_task)
+        ]
+        rng.shuffle(selected)
+        return iter(selected)
 
 
 def _token_ids(tokenizer, text):

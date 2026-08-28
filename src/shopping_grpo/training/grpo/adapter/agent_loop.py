@@ -10,7 +10,11 @@ import json
 
 from verl.experimental.agent_loop.tool_agent_loop import AgentState, ToolAgentLoop
 
-from shopping_grpo.environment.context import ContextBudgetError, compact_token_trajectory
+from shopping_grpo.environment.context import (
+    ContextBudgetError,
+    compact_token_trajectory,
+    tool_result_placeholder,
+)
 from shopping_grpo.environment.projection import (
     ObservationProjectionError,
     project_observation,
@@ -43,6 +47,8 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
         context_input_budget_tokens=16384,
         context_preserve_recent_groups=1,
         context_compaction_enable=False,
+        result_clearing_enable=False,
+        result_keep_recent_groups=3,
         observation_token_budget=1536,
         observation_detail_token_budget=4096,
         observation_generic_token_budget=768,
@@ -66,6 +72,8 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
         self.context_input_budget_tokens = int(context_input_budget_tokens)
         self.context_preserve_recent_groups = int(context_preserve_recent_groups)
         self.context_compaction_enable = bool(context_compaction_enable)
+        self.result_clearing_enable = bool(result_clearing_enable)
+        self.result_keep_recent_groups = int(result_keep_recent_groups)
         self.observation_token_budget = int(observation_token_budget)
         self.observation_detail_token_budget = int(observation_detail_token_budget)
         self.observation_generic_token_budget = int(observation_generic_token_budget)
@@ -90,6 +98,8 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
         self.context_input_budget = self.context_input_budget_tokens
         if self.context_preserve_recent_groups < 1:
             raise ValueError("context_preserve_recent_groups must be positive")
+        if self.result_keep_recent_groups < 1:
+            raise ValueError("result_keep_recent_groups must be positive")
         if min(
             self.observation_token_budget,
             self.observation_detail_token_budget,
@@ -122,7 +132,38 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
                 runtime_state["context_max_input_tokens"],
                 current_input_tokens,
             )
-        if self.context_compaction_enable:
+        if self.result_clearing_enable and current_input_tokens > self.context_input_budget:
+            if agent_data.routed_experts is not None:
+                if runtime_state is not None:
+                    runtime_state["terminate"] = True
+                    runtime_state["termination_reason"] = "result_clearing_unsupported_routed_experts"
+                    runtime_state["error"] = runtime_state["termination_reason"]
+                    runtime_state["infrastructure_invalid"] = True
+                return AgentState.TERMINATED
+            try:
+                cleared_count, cleared_tokens = await self._clear_old_tool_response_spans(
+                    agent_data
+                )
+            except ContextBudgetError as exc:
+                if runtime_state is not None:
+                    runtime_state["terminate"] = True
+                    runtime_state["termination_reason"] = "result_clearing_failed"
+                    runtime_state["error"] = f"result_clearing_failed:{exc}"
+                    runtime_state["infrastructure_invalid"] = True
+                return AgentState.TERMINATED
+            if runtime_state is not None and cleared_count:
+                runtime_state["result_clearing_count"] += 1
+                runtime_state["result_cleared_tool_results"] += cleared_count
+                runtime_state["result_clearing_tokens_removed"] += cleared_tokens
+            if len(agent_data.prompt_ids) > self.context_input_budget:
+                if runtime_state is not None:
+                    runtime_state["terminate"] = True
+                    runtime_state["termination_reason"] = "context_result_clearing_exhausted"
+                    runtime_state["error"] = runtime_state["termination_reason"]
+                    runtime_state["infrastructure_invalid"] = True
+                return AgentState.TERMINATED
+
+        if self.context_compaction_enable and not self.result_clearing_enable:
             try:
                 prompt_ids, response_mask, response_logprobs, stats = compact_token_trajectory(
                     agent_data.prompt_ids,
@@ -145,6 +186,7 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
             stats = None
         if (
             not self.context_compaction_enable
+            and not self.result_clearing_enable
             and current_input_tokens
             > self.context_window_tokens
             - self.context_generation_reserve_tokens
@@ -242,11 +284,101 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
             runtime_state["termination_reason"] = "parallel_tool_calls"
             runtime_state["error"] = "parallel_tool_calls"
             return AgentState.TERMINATED
+        response_start = len(agent_data.prompt_ids)
+        tool_name = agent_data.tool_calls[0].name if agent_data.tool_calls else "unknown"
         next_state = await super()._handle_processing_tools_state(agent_data)
         runtime_state = current_runtime_state.get()
         if runtime_state is not None and runtime_state.get("terminate"):
             return AgentState.TERMINATED
+        response_end = len(agent_data.prompt_ids)
+        if response_end > response_start:
+            spans = getattr(agent_data, "_shopping_tool_response_spans", None)
+            if spans is None:
+                spans = []
+                agent_data._shopping_tool_response_spans = spans
+            spans.append(
+                {
+                    "start": response_start,
+                    "end": response_end,
+                    "tool_name": tool_name,
+                    "observation": (
+                        runtime_state.get("latest_observation", "")
+                        if runtime_state is not None
+                        else ""
+                    ),
+                    "cleared": False,
+                }
+            )
         return next_state
+
+    async def _clear_old_tool_response_spans(self, agent_data):
+        """Replace old tokenized tool observations without deleting tool calls.
+
+        veRL keeps assistant tool calls and tool responses only as one token
+        stream.  Recording exact response spans when a tool returns lets us
+        replace only the non-loss tool tokens, preserving response masks and
+        already-computed assistant log-probabilities byte-for-byte.
+        """
+
+        spans = getattr(agent_data, "_shopping_tool_response_spans", [])
+        protect_before = max(0, len(spans) - self.result_keep_recent_groups)
+        candidates = [span for span in spans[:protect_before] if not span["cleared"]]
+        cleared_count = 0
+        removed_tokens = 0
+        for span in candidates:
+            if len(agent_data.prompt_ids) <= self.context_input_budget:
+                break
+            placeholder = tool_result_placeholder(
+                span["tool_name"], span["observation"]
+            )
+            replacement = await self.apply_chat_template(
+                [{"role": "tool", "content": placeholder}],
+                remove_system_prompt=True,
+            )
+            previous_length = span["end"] - span["start"]
+            if len(replacement) >= previous_length:
+                continue
+            self._replace_tool_response_span(agent_data, span, replacement)
+            cleared_count += 1
+            removed_tokens += previous_length - len(replacement)
+        return cleared_count, removed_tokens
+
+    @staticmethod
+    def _replace_tool_response_span(agent_data, span, replacement):
+        """Apply one token replacement and keep all veRL-aligned arrays valid."""
+
+        start, end = int(span["start"]), int(span["end"])
+        if not 0 <= start < end <= len(agent_data.prompt_ids):
+            raise ContextBudgetError("recorded tool response span is out of bounds")
+        response_start = len(agent_data.prompt_ids) - len(agent_data.response_mask)
+        mask_start, mask_end = start - response_start, end - response_start
+        if mask_start < 0 or mask_end > len(agent_data.response_mask):
+            raise ContextBudgetError("tool response span overlaps immutable initial prompt")
+        if any(agent_data.response_mask[mask_start:mask_end]):
+            raise ContextBudgetError("tool response span overlaps assistant loss tokens")
+        old_length = end - start
+        delta = len(replacement) - old_length
+        agent_data.prompt_ids = agent_data.prompt_ids[:start] + list(replacement) + agent_data.prompt_ids[end:]
+        agent_data.response_mask = (
+            agent_data.response_mask[:mask_start]
+            + [0] * len(replacement)
+            + agent_data.response_mask[mask_end:]
+        )
+        if agent_data.response_logprobs:
+            agent_data.response_logprobs = (
+                agent_data.response_logprobs[:mask_start]
+                + [0.0] * len(replacement)
+                + agent_data.response_logprobs[mask_end:]
+            )
+        span["end"] = span["start"] + len(replacement)
+        span["cleared"] = True
+        if delta:
+            for later in getattr(agent_data, "_shopping_tool_response_spans", []):
+                if later is span:
+                    continue
+                if later["start"] >= end:
+                    later["start"] += delta
+                    later["end"] += delta
 
     async def run(self, sampling_params, **kwargs):
         """启动 session、运行父类 AgentLoop，并在 finally 中释放环境租约。"""
@@ -302,6 +434,11 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
                 "context_compactions": int(state["context_compactions"]),
                 "context_tokens_removed": int(state["context_tokens_removed"]),
                 "context_max_input_tokens": int(state["context_max_input_tokens"]),
+                "result_clearing_count": int(state["result_clearing_count"]),
+                "result_cleared_tool_results": int(state["result_cleared_tool_results"]),
+                "result_clearing_tokens_removed": int(
+                    state["result_clearing_tokens_removed"]
+                ),
                 "observation_projection_count": int(state["observation_projection_count"]),
                 "observation_truncated_count": int(state["observation_truncated_count"]),
                 "observation_raw_tokens": int(state["observation_raw_tokens"]),

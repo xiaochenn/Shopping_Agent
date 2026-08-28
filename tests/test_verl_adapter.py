@@ -168,6 +168,42 @@ class VerlAdapterRuntimeTest(unittest.TestCase):
         finally:
             current_runtime_state.reset(token)
 
+    def test_result_clearing_replaces_only_old_tool_response_tokens(self):
+        """历史 tool result 可缩短，但 assistant token、mask 与近期页面必须保留。"""
+        class AgentData:
+            prompt_ids = [10, 20, 21] + list(range(30, 38)) + [40, 41, 50, 51, 52, 53]
+            response_mask = [1, 1] + [0] * 8 + [1, 1] + [0] * 4
+            response_logprobs = [0.1, 0.2] + [0.0] * 8 + [0.3, 0.4] + [0.0] * 4
+            _shopping_tool_response_spans = [
+                {"start": 3, "end": 11, "tool_name": "search_products", "observation": "old", "cleared": False},
+                {"start": 13, "end": 17, "tool_name": "open_product", "observation": "latest", "cleared": False},
+            ]
+
+        async def template(messages, remove_system_prompt):
+            self.assertTrue(remove_system_prompt)
+            self.assertEqual(messages[0]["role"], "tool")
+            return [99]
+
+        async def run():
+            loop = object.__new__(ShoppingToolAgentLoop)
+            loop.context_input_budget = 10
+            loop.result_keep_recent_groups = 1
+            loop.apply_chat_template = template
+            data = AgentData()
+            cleared, removed = await ShoppingToolAgentLoop._clear_old_tool_response_spans(loop, data)
+            return data, cleared, removed
+
+        data, cleared, removed = asyncio.run(run())
+        self.assertEqual((cleared, removed), (1, 7))
+        self.assertEqual(len(data.prompt_ids), 10)
+        self.assertEqual(data.prompt_ids[:3], [10, 20, 21])
+        self.assertEqual(data.prompt_ids[3], 99)
+        self.assertEqual(data.prompt_ids[-4:], [50, 51, 52, 53])
+        self.assertEqual(data.response_mask, [1, 1, 0, 1, 1, 0, 0, 0, 0])
+        self.assertEqual(len(data.response_logprobs), len(data.response_mask))
+        self.assertTrue(data._shopping_tool_response_spans[0]["cleared"])
+        self.assertEqual(data._shopping_tool_response_spans[1]["start"], 6)
+
     def test_runtime_state_has_no_hidden_goal_fields(self):
         state = make_runtime_state(task_id=2, max_steps=35)
         self.assertNotIn("goal", state)

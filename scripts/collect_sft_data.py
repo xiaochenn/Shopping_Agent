@@ -83,6 +83,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reasoning-effort", choices=("high", "max"), default="high")
     parser.add_argument("--context-window", type=int, default=0)
     parser.add_argument("--context-safety-margin", type=int, default=512)
+    parser.add_argument("--context-input-budget", type=int, default=0)
     parser.add_argument("--context-compaction", action="store_true")
     parser.add_argument(
         "--result-clearing",
@@ -195,6 +196,12 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--workers must be at least 1")
     if args.workers > 1 and args.target_accepted is None:
         raise SystemExit("--workers > 1 requires --target-accepted")
+    if args.context_input_budget < 0:
+        raise SystemExit("--context-input-budget cannot be negative")
+    if args.context_window and args.context_input_budget and args.context_input_budget > (
+        args.context_window - args.max_tokens - args.context_safety_margin
+    ):
+        raise SystemExit("--context-input-budget exceeds the usable context window")
     if args.result_keep_recent_groups < 1:
         raise SystemExit("--result-keep-recent-groups must be at least 1")
     if not 0 <= args.validation_ratio < 1:
@@ -220,6 +227,7 @@ def _make_client(args: argparse.Namespace) -> OpenAIChatClient:
         reasoning_effort=args.reasoning_effort,
         context_window=args.context_window or None,
         context_safety_margin=args.context_safety_margin,
+        context_input_budget=args.context_input_budget or None,
         context_compaction_enable=args.context_compaction,
         result_clearing_enable=args.result_clearing,
         result_keep_recent_groups=args.result_keep_recent_groups,
@@ -252,6 +260,7 @@ def _collection_config(args: argparse.Namespace) -> dict:
         "reasoning_effort": args.reasoning_effort,
         "context_window": args.context_window,
         "context_safety_margin": args.context_safety_margin,
+        "context_input_budget": args.context_input_budget or None,
         "context_compaction": args.context_compaction,
         "result_clearing": args.result_clearing,
         "result_keep_recent_groups": args.result_keep_recent_groups,

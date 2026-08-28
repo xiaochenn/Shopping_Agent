@@ -36,6 +36,12 @@ def parse_args():
     )
     parser.add_argument("--context-safety-margin", type=int, default=512)
     parser.add_argument(
+        "--context-input-budget",
+        type=int,
+        default=0,
+        help="启用上下文策略时的目标输入 token 预算；0 表示用窗口可用上限。",
+    )
+    parser.add_argument(
         "--context-compaction",
         action="store_true",
         help="上下文接近上限时压缩较早的交互；默认关闭。",
@@ -76,6 +82,12 @@ def main():
         raise SystemExit("--context-window 不能为负数")
     if args.context_window and args.context_window <= args.max_tokens + args.context_safety_margin:
         raise SystemExit("--context-window 必须大于 --max-tokens 与安全余量之和")
+    if args.context_input_budget < 0:
+        raise SystemExit("--context-input-budget 不能为负数")
+    if args.context_window and args.context_input_budget and args.context_input_budget > (
+        args.context_window - args.max_tokens - args.context_safety_margin
+    ):
+        raise SystemExit("--context-input-budget 超出模型窗口可用输入预算")
     if args.result_keep_recent_groups < 1:
         raise SystemExit("--result-keep-recent-groups 必须至少为 1")
     if args.observation_token_budget < 0:
@@ -91,6 +103,7 @@ def main():
         max_tokens=args.max_tokens,
         context_window=args.context_window,
         context_safety_margin=args.context_safety_margin,
+        context_input_budget=args.context_input_budget or None,
         context_compaction_enable=args.context_compaction,
         result_clearing_enable=args.result_clearing,
         result_keep_recent_groups=args.result_keep_recent_groups,
@@ -119,6 +132,7 @@ def main():
         "top_p": args.top_p,
         "context_window": args.context_window,
         "context_safety_margin": args.context_safety_margin,
+        "context_input_budget": args.context_input_budget or None,
         "context_compaction": args.context_compaction,
         "result_clearing": args.result_clearing,
         "result_keep_recent_groups": args.result_keep_recent_groups,

@@ -13,7 +13,8 @@ variants and terminate.
 - Main data: `data/sft_pure_v4/all.jsonl` (1,192 rows)
 - Fixed curriculum manifest: `data/sft_curriculum/manifest.json`
 - Gradient rows: 1,073; development rows: 119; Final evaluation overlap: 0
-- Target: assistant tokens only; user and tool-observation tokens are masked
+- Source trajectories: 1,192; eligible tool-call targets: 9,620
+- Target: one assistant tool call at a time; user and tool-observation tokens are masked
 
 The source and label hashes, exact task IDs, stage definitions, and review-only
 flags are frozen in the curriculum manifest. The older `data/sft/` split is
@@ -44,6 +45,9 @@ Default recipe:
 | Setting | Value |
 |---|---|
 | Maximum sequence length | 24,576 |
+| Online/SFT input budget | 16,384 tokens |
+| Historical result policy | Keep the latest 3 tool results; deterministically clear older results only when over budget |
+| Action sampling | 4 tool actions per source task per epoch, sampled uniformly by task |
 | Epochs | 1 per stage |
 | Per-device batch size | 1 |
 | Gradient accumulation | 8 |
@@ -53,9 +57,15 @@ Default recipe:
 | Attention implementation | SDPA |
 | Saved epoch checkpoints | 3 |
 
-The long context is intentional: a training example includes the complete
-multi-turn interaction. Shortening it may truncate the terminal decision or the
-evidence that supports it.
+SFT is action-level: each source trajectory is replayed into
+`visible prefix -> next tool call` examples. This exactly matches the online
+decision boundary and prevents a terminal natural-language response from being
+mistakenly learned as the agent action. When a prefix exceeds 16,384 input
+tokens, the same deterministic policy used in evaluation and GRPO replaces
+older tool results with non-actionable placeholders; assistant tool calls and
+the latest three observations remain intact. Long trajectories therefore do
+not need unsafe string truncation, and task-uniform sampling prevents them from
+receiving disproportionate gradient weight.
 
 Stage A learns the action protocol from 256 foundation rows. Stage B restarts a
 fresh LoRA on A's merged checkpoint and uses 799 cumulative constraint rows.

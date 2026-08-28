@@ -82,6 +82,10 @@ def build_stage_commands(
             "512",
             "--rollout-context-safety-margin",
             "512",
+            "--context-input-budget",
+            "16384",
+            "--actions-per-task-per-epoch",
+            "4",
             "--swanlab-run-name",
             f"pure-v4-stage-{stage}",
         ]

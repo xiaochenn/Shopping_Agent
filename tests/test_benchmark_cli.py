@@ -36,6 +36,7 @@ class BenchmarkCliTest(unittest.TestCase):
         self.assertEqual(args.temperature, 0.0)
         self.assertEqual(args.context_window, 24576)
         self.assertEqual(args.context_safety_margin, 512)
+        self.assertEqual(args.context_input_budget, 0)
         self.assertFalse(args.context_compaction)
         self.assertEqual(args.observation_token_budget, 1536)
         self.assertEqual(args.observation_detail_token_budget, 4096)
