@@ -1,0 +1,26 @@
+{
+  "schema_version": "shopping-budget-semantics-v1",
+  "source": "/data2/pyc/code/shopping-grpo-longhorizon-main/environments/ShopSimulator/shop_env/data/items_eval_train.json",
+  "source_sha256": "57b10950a0064d16c81535a1d764a75879a508d250dde8a2a1787c5e6045559f",
+  "task_count": 23421,
+  "counts_by_budget_type": {
+    "approximate_band": 8893,
+    "approximate_range": 48,
+    "hard_upper": 3019,
+    "lower_bound": 57,
+    "needs_llm": 9389,
+    "no_explicit_budget": 1307,
+    "range": 708
+  },
+  "approximate_band": {
+    "lower_tolerance": 0.1,
+    "upper_tolerance": 0.05,
+    "absolute_tolerance_floor": 10.0
+  },
+  "approximate_range": {
+    "lower_policy": "subtract max(10 yuan, 10% of stated lower)",
+    "upper_policy": "add max(10 yuan, 5% of stated upper)"
+  },
+  "tier_1_policy": "high_precision_regex_only",
+  "tier_2_queue": "/data2/pyc/code/shopping-grpo-longhorizon-main/data/annotations/budget_semantics_v1_needs_llm.jsonl"
+}

@@ -1,0 +1,27 @@
+{
+  "budget_type_counts": {
+    "approximate_band": 13790,
+    "approximate_range": 95,
+    "hard_upper": 7137,
+    "lower_bound": 150,
+    "no_explicit_budget": 1349,
+    "price_preference": 15,
+    "range": 883
+  },
+  "excluded_task_count": 2,
+  "human_confirmed_unknown_count": 2,
+  "review_status_counts": {
+    "auto_accepted": 14032,
+    "human_reviewed": 246,
+    "pending_audit": 9141
+  },
+  "schema_version": "shopping-budget-semantics-v1",
+  "source_task_count": 23421,
+  "stage_counts": {
+    "human_review": 246,
+    "llm_initial": 8512,
+    "llm_retry": 629,
+    "tier1_regex": 14032
+  },
+  "task_count": 23419
+}

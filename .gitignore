@@ -1,0 +1,34 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+.DS_Store
+.venv/
+.venv-*/
+venv/
+*.egg-info/
+build/
+dist/
+.env
+*.log
+
+# Rebuildable ShopSimulator runtime assets (created by scripts/setup.sh).
+environments/ShopSimulator/.venv-shopsim/
+environments/ShopSimulator/shop_env/data/items_eval_train.json
+environments/ShopSimulator/shop_env/data/fine_items_eval_train_all.json.gz
+environments/ShopSimulator/shop_env/search_engine/products.sqlite3
+environments/ShopSimulator/shop_env/search_engine/products.manifest.json
+
+# Local installer/cache artifacts.
+.tools/
+cuda-keyring_*.deb
+
+outputs/
+checkpoints/
+models/
+swanlog/
+wandb/
+logs/
