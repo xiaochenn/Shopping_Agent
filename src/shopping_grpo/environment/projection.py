@@ -400,16 +400,30 @@ def _footer_lines(footer, buttons):
         ),
         "搜索功能是否可用: False",
     )
-    return [
-        search_state,
-        "可点击的按钮: " + json.dumps(buttons, ensure_ascii=False),
-    ]
+    price_requirement = next(
+        (
+            line.strip()
+            for line in footer.splitlines()
+            if line.strip().startswith("购买前需选择价格规格轴:")
+        ),
+        None,
+    )
+    lines = [search_state]
+    if price_requirement:
+        lines.append(price_requirement)
+    lines.append("可点击的按钮: " + json.dumps(buttons, ensure_ascii=False))
+    return lines
 
 
 def _critical_footer_preserved(raw, visible, *, raw_buttons, visible_buttons):
     if "搜索功能是否可用:" in raw and "搜索功能是否可用:" not in visible:
         return False
     if "可点击的按钮:" in raw and "可点击的按钮:" not in visible:
+        return False
+    if (
+        "购买前需选择价格规格轴:" in raw
+        and "购买前需选择价格规格轴:" not in visible
+    ):
         return False
     raw_navigation = {
         button.casefold() for button in raw_buttons if button.casefold() in NAVIGATION_BUTTONS

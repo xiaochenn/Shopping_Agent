@@ -49,6 +49,40 @@ class ObservationV2Test(unittest.TestCase):
         self.assertNotIn("goal", state)
         self.assertNotIn("reward", state)
 
+    def test_detail_exposes_only_unselected_price_affecting_axes(self):
+        product = {
+            "asin": "123456789012",
+            "title": "测试商品",
+            "customization_options": {
+                "颜色分类": [
+                    {"value": "黑色", "price": 10},
+                    {"value": "白色", "price": 20},
+                ],
+                "包装": [
+                    {"value": "单件", "price": 10},
+                    {"value": "两件", "price": 10},
+                ],
+            },
+        }
+        state = build_observation_state(
+            page_type="product_detail",
+            session={"asin": "123456789012", "options": {}},
+            product_item_dict={"123456789012": product},
+            available_actions={"has_search_bar": False, "clickables": ["Buy Now"]},
+        )
+
+        self.assertEqual(state["unselected_price_option_axes"], ["颜色分类"])
+        self.assertNotIn("goal", state)
+        self.assertNotIn("reward", state)
+
+        selected = build_observation_state(
+            page_type="product_detail",
+            session={"asin": "123456789012", "options": {"颜色分类": "黑色"}},
+            product_item_dict={"123456789012": product},
+            available_actions={"has_search_bar": False, "clickables": ["Buy Now"]},
+        )
+        self.assertEqual(selected["unselected_price_option_axes"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

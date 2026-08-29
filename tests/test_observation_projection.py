@@ -140,6 +140,27 @@ class ObservationProjectionTest(unittest.TestCase):
         self.assertIn("TAIL_SPECIFICATION", visible)
         self.assertTrue(meta.critical_footer_preserved)
 
+    def test_generic_projection_preserves_price_selection_requirement(self):
+        raw = (
+            "详情 " + "很长的规格说明 " * 300
+            + "\n\n搜索功能是否可用: False"
+            + '\n购买前需选择价格规格轴: ["颜色分类"]'
+            + '\n可点击的按钮: ["黑色", "白色", "Buy Now"]'
+        )
+        visible, meta = project_observation(
+            "open_product",
+            raw,
+            count_tokens=len,
+            detail_token_budget=360,
+        )
+
+        self.assertTrue(meta.truncated)
+        self.assertIn('购买前需选择价格规格轴: ["颜色分类"]', visible)
+        self.assertEqual(
+            action_reject_reason("buy_now", {}, visible),
+            "price_affecting_option_unselected:颜色分类",
+        )
+
     def test_long_page_without_action_footer_fails_closed(self):
         with self.assertRaisesRegex(ObservationProjectionError, "action footer"):
             project_observation(

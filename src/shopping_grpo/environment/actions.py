@@ -66,6 +66,10 @@ def action_reject_reason(name, arguments, observation):
         return "select_option_is_navigation_button"
     if target not in {button.casefold() for button in clickable_buttons(observation)}:
         return "click_not_in_previous_observation"
+    if name == "buy_now":
+        missing_price_axes = unselected_price_option_axes(observation)
+        if missing_price_axes:
+            return "price_affecting_option_unselected:" + ",".join(missing_price_axes)
     return None
 
 
@@ -94,7 +98,15 @@ def action_guard_tool_message(tool_call, reason, observation):
     if "back to search" in normalized_targets:
         return_tools.append("back_to_search")
     only_return_buttons = bool(normalized_targets) and normalized_targets <= {"< prev", "back to search"}
-    if only_return_buttons:
+    if reason.startswith("price_affecting_option_unselected:"):
+        axes = reason.split(":", 1)[1]
+        correction = (
+            "当前商品的实际成交价取决于尚未选择的规格轴（"
+            + axes
+            + "）。请先调用 select_option 选择当前页面可见的对应规格，"
+            "再根据完整 variant 的价格决定是否购买。"
+        )
+    elif only_return_buttons:
         correction = f"你处于信息子页，下一步只能调用 {' 或 '.join(return_tools)}。"
     else:
         correction = "下一步只能从当前页面列出的目标中选择。"
@@ -132,3 +144,15 @@ def clickable_buttons(observation):
     except json.JSONDecodeError:
         return []
     return [button for button in buttons if isinstance(button, str)]
+
+
+def unselected_price_option_axes(observation):
+    """Read the renderer's public purchase requirement from an observation."""
+    match = re.search(r"(?m)^购买前需选择价格规格轴:\s*(\[[^\n]*\])\s*$", observation)
+    if not match:
+        return []
+    try:
+        values = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return []
+    return [str(value) for value in values if str(value).strip()] if isinstance(values, list) else []

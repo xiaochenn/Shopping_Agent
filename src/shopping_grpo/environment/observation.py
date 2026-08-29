@@ -32,10 +32,18 @@ def _list(value):
 
 def _footer(state):
     actions = _list(state.get("actions"))
-    return [
+    lines = [
         f"搜索功能是否可用: {bool(state.get('search_available'))}",
-        "可点击的按钮: " + json.dumps(actions, ensure_ascii=False),
     ]
+    price_axes = _list(state.get("unselected_price_option_axes"))
+    if price_axes:
+        # Keep this in the footer: the observation projector preserves footer
+        # fields verbatim, so the purchase guard sees the same state as model.
+        lines.append(
+            "购买前需选择价格规格轴: " + json.dumps(price_axes, ensure_ascii=False)
+        )
+    lines.append("可点击的按钮: " + json.dumps(actions, ensure_ascii=False))
+    return lines
 
 
 def render_structured_observation(state: Mapping) -> str:

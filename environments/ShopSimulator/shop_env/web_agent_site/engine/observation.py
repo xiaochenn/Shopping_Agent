@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import math
 
+from web_agent_site.engine.reward_features import canonicalize_option_axis
+from web_agent_site.engine.variant_price import option_axes
+
 
 OBSERVATION_VERSION = "shopping-observation-v2"
 
@@ -33,6 +36,35 @@ def product_summary(product: dict, *, rank: int | None = None) -> dict:
     if rank is not None:
         result["rank"] = int(rank)
     return result
+
+
+def unselected_price_option_axes(product: dict, selected_options: object) -> list[str]:
+    """Return public option axes that must be selected to resolve a price.
+
+    This describes only the currently displayed product and its selected options;
+    it intentionally does not inspect the task goal or Reward result.  An axis
+    is relevant when its listed values have different finite prices.
+    """
+    selected_axes = {
+        canonicalize_option_axis(axis)
+        for axis in (selected_options or {})
+        if isinstance(axis, str)
+    } if isinstance(selected_options, dict) else set()
+    indexed = option_axes(product)
+    if indexed["collisions"]:
+        # Preserve Reward v3's conservative handling of ambiguous axes rather
+        # than exposing a potentially misleading purchase requirement.
+        return []
+    required = []
+    for canonical_axis, axis in indexed["axes"].items():
+        prices = {
+            entry["price"]
+            for entry in axis["values"].values()
+            if entry["price"] is not None
+        }
+        if len(prices) > 1 and canonical_axis not in selected_axes:
+            required.append(axis["source_axis"])
+    return required
 
 
 def build_observation_state(
@@ -84,12 +116,17 @@ def build_observation_state(
     elif page_type in {"product_detail", "information_subpage"}:
         asin = session.get("asin")
         product = product_item_dict.get(asin, {})
+        selected_options = dict(session.get("options") or {})
         state["product"] = product_summary(product)
-        state["selected_options"] = dict(session.get("options") or {})
+        state["selected_options"] = selected_options
         state["available_options"] = {
             str(key): _compact_list(values, limit=100)
             for key, values in (product.get("options") or {}).items()
         }
+        state["unselected_price_option_axes"] = unselected_price_option_axes(
+            product,
+            selected_options,
+        )
         if session.get("selected_price") is not None:
             state["selected_price"] = session["selected_price"]
         if page_type == "information_subpage":

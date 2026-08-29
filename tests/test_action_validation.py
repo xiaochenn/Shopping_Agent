@@ -33,6 +33,22 @@ class ActionValidationTest(unittest.TestCase):
 
         self.assertEqual(reason, "schema_extra_arguments:string")
 
+    def test_buy_now_requires_unselected_price_axis(self):
+        observation = (
+            "商品页\n"
+            '购买前需选择价格规格轴: ["颜色分类"]\n'
+            '\n可点击的按钮: ["黑色", "Buy Now"]'
+        )
+
+        reason = action_reject_reason("buy_now", {}, observation)
+
+        self.assertEqual(reason, "price_affecting_option_unselected:颜色分类")
+
+    def test_buy_now_allows_product_without_price_requirement(self):
+        observation = '商品页\n\n可点击的按钮: ["Buy Now"]'
+
+        self.assertIsNone(action_reject_reason("buy_now", {}, observation))
+
     def test_structured_observation_accepts_real_eleven_digit_product_id(self):
         asin = "35842622441"
         observation = (
