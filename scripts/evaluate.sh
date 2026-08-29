@@ -10,6 +10,12 @@ LLM_API_KEY="${LLM_API_KEY:-EMPTY}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-shopping-agent}"
 CONTEXT_INPUT_BUDGET="${CONTEXT_INPUT_BUDGET:-16384}"
 
+# Both default endpoints are local services.  Explicitly bypass any shell-wide
+# proxy so Python's urllib token-counter reaches vLLM instead of the proxy.
+LOCAL_NO_PROXY="127.0.0.1,localhost,::1"
+export NO_PROXY="${NO_PROXY:+${NO_PROXY},}${LOCAL_NO_PROXY}"
+export no_proxy="${no_proxy:+${no_proxy},}${LOCAL_NO_PROXY}"
+
 mkdir -p "$OUTPUT_DIR"
 cd "$ROOT"
 "$ROOT/.venv/bin/python" scripts/evaluate_shop_benchmark.py \
