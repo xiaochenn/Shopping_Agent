@@ -9,6 +9,7 @@ from scripts.collect_sft_data import (
     _is_retryable_model_transport_failure,
     _validate_args,
     batch_paths,
+    collect_fixed_tasks,
     collect_until_target,
     parse_args,
 )
@@ -158,6 +159,38 @@ class CollectSftDataCliTests(unittest.TestCase):
         self.assertEqual(accepted, 1)
         self.assertEqual(collect.call_count, 2)
         self.assertTrue(_is_retryable_model_transport_failure(rows[0]))
+
+    def test_fixed_collection_uses_fresh_client_for_each_parallel_task(self):
+        clients = []
+
+        def client_factory():
+            client = object()
+            clients.append(client)
+            return client
+
+        def collect(task, *, client, **kwargs):
+            return {
+                "trajectory_id": f"trajectory-{task['task_id']}",
+                "task_id": task["task_id"],
+                "client_id": id(client),
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch(
+            "scripts.collect_sft_data.collect_for_task", side_effect=collect
+        ):
+            written = collect_fixed_tasks(
+                tasks=[{"task_id": 1}, {"task_id": 2}, {"task_id": 3}],
+                client_factory=client_factory,
+                output_path=Path(tmpdir) / "raw.jsonl",
+                base_url="http://shop.test",
+                max_steps=35,
+                attempts_per_task=1,
+                workers=2,
+            )
+
+        self.assertEqual({row["task_id"] for row in written}, {1, 2, 3})
+        self.assertEqual(len(clients), 3)
+        self.assertEqual(len({row["client_id"] for row in written}), 3)
 
 
 if __name__ == "__main__":

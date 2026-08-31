@@ -197,6 +197,87 @@ def collect_until_target(
     return written, accepted
 
 
+def collect_fixed_tasks(
+    *,
+    tasks,
+    client_factory,
+    output_path,
+    base_url,
+    max_steps,
+    attempts_per_task,
+    workers=1,
+    transient_task_retries=0,
+    transient_task_retry_delay_seconds=0,
+):
+    """Collect each requested task once, with bounded rollout concurrency.
+
+    The output writer remains in the parent process, so resumability is
+    preserved and raw JSONL records cannot interleave.  Each concurrent rollout
+    receives a fresh client because context-compaction metadata is client-local.
+    """
+
+    workers = int(workers)
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
+    retries = int(transient_task_retries)
+    if retries < 0:
+        raise ValueError("transient_task_retries cannot be negative")
+    completed = completed_task_attempts(output_path)
+    candidates = [
+        (task, attempt_index)
+        for task in tasks
+        for attempt_index in range(int(attempts_per_task))
+        if (int(task["task_id"]), attempt_index) not in completed
+    ]
+    candidate_iter = iter(candidates)
+    pending = {}
+    written = []
+    infrastructure_failed = False
+
+    def run_task(task, attempt_index):
+        for retry_index in range(retries + 1):
+            trajectory = collect_for_task(
+                task,
+                client=client_factory(),
+                base_url=base_url,
+                max_steps=max_steps,
+                attempt_index=attempt_index,
+            )
+            if not _is_retryable_model_transport_failure(trajectory):
+                return trajectory
+            if retry_index >= retries:
+                return trajectory
+            if transient_task_retry_delay_seconds:
+                time.sleep(float(transient_task_retry_delay_seconds) * (2**retry_index))
+
+    def submit_available(executor):
+        while len(pending) < workers:
+            try:
+                task, attempt_index = next(candidate_iter)
+            except StopIteration:
+                return
+            pending[executor.submit(run_task, task, attempt_index)] = (task, attempt_index)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        submit_available(executor)
+        while pending:
+            completed_futures, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in completed_futures:
+                pending.pop(future)
+                trajectory = future.result()
+                append_jsonl(output_path, [trajectory])
+                written.append(trajectory)
+                infrastructure_failed |= _is_infrastructure_failure(trajectory)
+            if not infrastructure_failed:
+                submit_available(executor)
+
+    if infrastructure_failed:
+        raise CollectionInfrastructureError(
+            "collection infrastructure failure; stopped before the next task"
+        )
+    return written
+
+
 def _accepted_count(raw_path: Path, excluded_task_ids=()) -> int:
     raw_path = Path(raw_path)
     if not raw_path.exists():
@@ -223,8 +304,6 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--attempts-per-task must be at least 1")
     if args.workers < 1:
         raise SystemExit("--workers must be at least 1")
-    if args.workers > 1 and args.target_accepted is None:
-        raise SystemExit("--workers > 1 requires --target-accepted")
     if args.completion_retries < 0:
         raise SystemExit("--completion-retries cannot be negative")
     if args.retry_delay_seconds < 0:
@@ -335,14 +414,14 @@ def main() -> int:
             tasks = tasks[: args.limit]
         try:
             if args.target_accepted is None:
-                client = _make_client(args)
-                written = collect_tasks(
-                    tasks,
-                    client=client,
+                written = collect_fixed_tasks(
+                    tasks=tasks,
+                    client_factory=lambda: _make_client(args),
                     output_path=paths["raw"],
                     base_url=args.base_url,
                     max_steps=args.max_steps,
                     attempts_per_task=args.attempts_per_task,
+                    workers=args.workers,
                     transient_task_retries=args.transient_task_retries,
                     transient_task_retry_delay_seconds=args.transient_task_retry_delay_seconds,
                 )
