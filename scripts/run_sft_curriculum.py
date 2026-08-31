@@ -104,7 +104,6 @@ def build_stage_commands(
             "--save-steps",
             str(checkpoint_steps),
             "--action-level-sft",
-            "--result-clearing",
             "--result-keep-recent-groups",
             "3",
             "--rollout-context-window",

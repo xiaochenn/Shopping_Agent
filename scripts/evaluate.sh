@@ -26,8 +26,6 @@ cd "$ROOT"
   --model "$SERVED_MODEL_NAME" \
   --llm-base-url "$LLM_BASE_URL" \
   --api-key "$LLM_API_KEY" \
-  --context-input-budget "$CONTEXT_INPUT_BUDGET" \
-  --result-clearing \
-  --result-keep-recent-groups 3
+  --context-input-budget "$CONTEXT_INPUT_BUDGET"
 
 "$ROOT/.venv/bin/python" scripts/build_eval_report.py --run-dir "$OUTPUT_DIR"

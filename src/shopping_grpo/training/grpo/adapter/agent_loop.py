@@ -19,6 +19,11 @@ from shopping_grpo.environment.projection import (
     ObservationProjectionError,
     project_observation,
 )
+from shopping_grpo.environment.shopping_state import (
+    CONTEXT_POLICY_VERSION,
+    augment_current_observation,
+    reduce_shopping_state,
+)
 from shopping_grpo.training.grpo.adapter.runtime import (
     apply_reward_length_shaping,
     current_runtime_state,
@@ -44,11 +49,12 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
         context_window_tokens=24576,
         context_generation_reserve_tokens=512,
         context_safety_margin_tokens=512,
-        context_input_budget_tokens=16384,
+        context_input_budget_tokens=23552,
         context_preserve_recent_groups=1,
         context_compaction_enable=False,
         result_clearing_enable=False,
         result_keep_recent_groups=3,
+        context_policy_version=CONTEXT_POLICY_VERSION,
         observation_token_budget=1536,
         observation_detail_token_budget=4096,
         observation_generic_token_budget=768,
@@ -74,6 +80,7 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
         self.context_compaction_enable = bool(context_compaction_enable)
         self.result_clearing_enable = bool(result_clearing_enable)
         self.result_keep_recent_groups = int(result_keep_recent_groups)
+        self.context_policy_version = str(context_policy_version)
         self.observation_token_budget = int(observation_token_budget)
         self.observation_detail_token_budget = int(observation_detail_token_budget)
         self.observation_generic_token_budget = int(observation_generic_token_budget)
@@ -100,6 +107,8 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
             raise ValueError("context_preserve_recent_groups must be positive")
         if self.result_keep_recent_groups < 1:
             raise ValueError("result_keep_recent_groups must be positive")
+        if self.context_policy_version != CONTEXT_POLICY_VERSION:
+            raise ValueError(f"unsupported context_policy_version: {self.context_policy_version!r}")
         if min(
             self.observation_token_budget,
             self.observation_detail_token_budget,
@@ -132,7 +141,41 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
                 runtime_state["context_max_input_tokens"],
                 current_input_tokens,
             )
-        if self.result_clearing_enable and current_input_tokens > self.context_input_budget:
+        if self.context_policy_version == CONTEXT_POLICY_VERSION:
+            if agent_data.routed_experts is not None:
+                if runtime_state is not None:
+                    runtime_state["terminate"] = True
+                    runtime_state["termination_reason"] = "context_policy_unsupported_routed_experts"
+                    runtime_state["error"] = runtime_state["termination_reason"]
+                    runtime_state["infrastructure_invalid"] = True
+                return AgentState.TERMINATED
+            try:
+                cleared_count, cleared_tokens = await self._clear_old_tool_response_spans(
+                    agent_data, force_fixed_k=True
+                )
+            except ContextBudgetError as exc:
+                if runtime_state is not None:
+                    runtime_state["terminate"] = True
+                    runtime_state["termination_reason"] = "context_policy_rewrite_failed"
+                    runtime_state["error"] = f"context_policy_rewrite_failed:{exc}"
+                    runtime_state["infrastructure_invalid"] = True
+                return AgentState.TERMINATED
+            if runtime_state is not None and cleared_count:
+                runtime_state["result_clearing_count"] += 1
+                runtime_state["result_cleared_tool_results"] += cleared_count
+                runtime_state["result_clearing_tokens_removed"] += cleared_tokens
+            if len(agent_data.prompt_ids) > self.context_input_budget:
+                if runtime_state is not None:
+                    runtime_state["terminate"] = True
+                    runtime_state["termination_reason"] = "context_policy_budget_exhausted"
+                    runtime_state["error"] = runtime_state["termination_reason"]
+                    runtime_state["infrastructure_invalid"] = True
+                return AgentState.TERMINATED
+        if (
+            self.context_policy_version != CONTEXT_POLICY_VERSION
+            and self.result_clearing_enable
+            and current_input_tokens > self.context_input_budget
+        ):
             if agent_data.routed_experts is not None:
                 if runtime_state is not None:
                     runtime_state["terminate"] = True
@@ -163,7 +206,11 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
                     runtime_state["infrastructure_invalid"] = True
                 return AgentState.TERMINATED
 
-        if self.context_compaction_enable and not self.result_clearing_enable:
+        if (
+            self.context_policy_version != CONTEXT_POLICY_VERSION
+            and self.context_compaction_enable
+            and not self.result_clearing_enable
+        ):
             try:
                 prompt_ids, response_mask, response_logprobs, stats = compact_token_trajectory(
                     agent_data.prompt_ids,
@@ -185,7 +232,8 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
             response_logprobs = agent_data.response_logprobs
             stats = None
         if (
-            not self.context_compaction_enable
+            self.context_policy_version != CONTEXT_POLICY_VERSION
+            and not self.context_compaction_enable
             and not self.result_clearing_enable
             and current_input_tokens
             > self.context_window_tokens
@@ -270,10 +318,17 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
         projection_meta = projection.to_dict()
         state["latest_observation_raw"] = raw_observation
         state["latest_observation"] = visible_observation
+        state["shopping_state"] = reduce_shopping_state(
+            state.get("shopping_state"),
+            tool_call.name,
+            parameters,
+            raw_observation,
+            done=bool((step or {}).get("done", False)) if isinstance(step, dict) else False,
+        )
         record_observation_projection(state, projection_meta)
         if isinstance(step, dict):
             step["projection"] = projection_meta
-        response.text = visible_observation
+        response.text = augment_current_observation(visible_observation, state["shopping_state"])
         return response, reward, step
 
     async def _handle_processing_tools_state(self, agent_data):
@@ -311,7 +366,7 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
             )
         return next_state
 
-    async def _clear_old_tool_response_spans(self, agent_data):
+    async def _clear_old_tool_response_spans(self, agent_data, *, force_fixed_k=False):
         """Replace old tokenized tool observations without deleting tool calls.
 
         veRL keeps assistant tool calls and tool responses only as one token
@@ -326,7 +381,7 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
         cleared_count = 0
         removed_tokens = 0
         for span in candidates:
-            if len(agent_data.prompt_ids) <= self.context_input_budget:
+            if not force_fixed_k and len(agent_data.prompt_ids) <= self.context_input_budget:
                 break
             placeholder = tool_result_placeholder(
                 span["tool_name"], span["observation"]
@@ -431,6 +486,9 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
                 "reward_valid": bool(state.get("reward_valid", True)),
                 "reward_unverifiable": bool(state.get("reward_unverifiable")),
                 "reward": breakdown,
+                "context_policy_version": getattr(
+                    self, "context_policy_version", CONTEXT_POLICY_VERSION
+                ),
                 "context_compactions": int(state["context_compactions"]),
                 "context_tokens_removed": int(state["context_tokens_removed"]),
                 "context_max_input_tokens": int(state["context_max_input_tokens"]),

@@ -8,6 +8,7 @@ import json
 import os
 import time
 import traceback
+import hashlib
 from datetime import datetime, timezone
 from http.client import RemoteDisconnected
 from urllib.error import HTTPError, URLError
@@ -24,6 +25,15 @@ from shopping_grpo.environment.context import (
     compact_chat_messages,
 )
 from shopping_grpo.environment.projection import project_observation
+from shopping_grpo.environment.shopping_state import (
+    CONTEXT_POLICY_VERSION,
+    DEFAULT_KEEP_RECENT_GROUPS,
+    augment_current_observation,
+    build_context_view,
+    canonical_shopping_state,
+    empty_shopping_state,
+    reduce_shopping_state,
+)
 from shopping_grpo.environment.client import ShopAgentEnv, ShopEnvironmentError, ShopHttpError
 from shopping_grpo.environment.tools import (
     SHOP_TOOL_SCHEMAS,
@@ -37,7 +47,7 @@ SYSTEM_PROMPT = """你是一个购物 Agent，负责在 ShopSimulator 中替用�
 用户的完整需求只会在开头给出。不得向用户追问、确认、告别，也不要假设存在用户对话工具。你只能调用提供的标准工具与商店交互。目标是在有限步骤内找到整体最符合需求的可购买商品；精确满足全部要求的商品最好，经过有效探索仍无法完成时应合理结束，不能错误购买或无效循环。
 
 执行规则：
-1. 动作合法性与历史比较。当前页面是动作合法性的唯一依据；历史 observation 可以用于记住和比较候选，但不能直接点击历史页面中的 ASIN、按钮或规格。每次工具返回后先阅读最新 observation 中的“可点击的按钮”，每个 assistant 回合只调用一个工具。
+1. 动作合法性与历史比较。当前页面是动作合法性的唯一依据；`[SHOPPING_STATE_V1]` 是截至当前的只读事实账本，覆盖所有成功历史结果（含最近三轮），但不是页面、没有按钮。历史 observation 可以用于记住和比较候选，state 也可用于此目的；但不能直接点击历史页面中的 ASIN、按钮或规格，也不能点击 state 中的标识。每次工具返回后先阅读最新 observation 中的“可点击的按钮”，每个 assistant 回合只调用一个工具。
 2. 页面状态与参数。Description、Features、Reviews、Attributes 都是信息子页：一旦进入这类子页，必须先调用当前页面可见的 `prev_page` 或 `back_to_search` 返回；不得直接切换到另一个信息子页、选择规格、购买或搜索。无参数工具（查看、翻页、返回、购买）必须传严格的 `{}`；只有 `search_products` 使用 `query`、`open_product` 使用 `asin`、`select_option` 使用 `value`。
 3. 搜索与候选探索。查询应简洁，优先使用品类和最有区分度的品牌、型号、核心功能或规格，不要机械复制整段需求。结果不理想时，缩短查询、更换真正不同的关键词或翻页；出现有希望的商品时应打开核验。不要重复相同查询，也不要只做同义改写却反复得到相同候选。
 4. 固定选择优先级。按“品类 > 预算 > 品牌 > 型号与核心功能 > 规格属性”比较候选。品类必须正确；选择具体规格后的实际价格不得超过用户明确预算。品类不符、价格未知或超预算时绝不能购买。在通过这两个门槛的候选中，依次优先满足品牌、型号与核心功能、规格属性；全部要求都满足的候选最好。
@@ -345,6 +355,9 @@ def collect_for_task(
         "tool_call_truncations": [],
         "context_compactions": [],
         "context_turn_tokens": [],
+        "context_policy_version": CONTEXT_POLICY_VERSION,
+        "state_trace": [],
+        "context_trace": [],
         "initial_result": {},
         "terminal_result": {},
         "final_reward": 0.0,
@@ -370,10 +383,26 @@ def collect_for_task(
         tool_schemas = tools or SHOP_TOOL_SCHEMAS
         consecutive_blocked_calls = 0
         latest_observation_truncated = False
+        shopping_state = empty_shopping_state()
 
         while len(trajectory["steps"]) < int(max_steps):
             # 先请求模型，再校验动作；工具结果会追加到 messages，成为下一轮上下文。
-            assistant = client.complete(messages, tool_schemas)
+            context_messages, context_policy = build_context_view(
+                messages,
+                keep_recent_groups=DEFAULT_KEEP_RECENT_GROUPS,
+            )
+            state_snapshot = canonical_shopping_state(shopping_state)
+            trajectory["context_trace"].append(
+                {
+                    "step_index": len(trajectory["steps"]),
+                    "state": state_snapshot,
+                    "cleared_tool_results": context_policy["cleared_tool_results"],
+                    "context_sha256": hashlib.sha256(
+                        json.dumps(context_messages, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                    ).hexdigest(),
+                }
+            )
+            assistant = client.complete(context_messages, tool_schemas)
             context_tokens = getattr(client, "last_context_tokens", None)
             if context_tokens is not None:
                 trajectory["context_turn_tokens"].append(
@@ -455,7 +484,20 @@ def collect_for_task(
             latest_observation_truncated = bool(
                 (step.get("projection") or {}).get("truncated")
             )
-            messages.append(_tool_message(tool_call, step))
+            shopping_state = reduce_shopping_state(
+                shopping_state,
+                step["tool_name"],
+                step["parameters"],
+                raw_observation,
+                done=bool(step["done"]),
+            )
+            trajectory["state_trace"].append(
+                {
+                    "step_index": len(trajectory["steps"]) - 1,
+                    "state": canonical_shopping_state(shopping_state),
+                }
+            )
+            messages.append(_tool_message(tool_call, step, shopping_state))
             if step["done"]:
                 trajectory["status"] = "done"
                 trajectory["terminal_result"] = step["result"]
@@ -621,12 +663,14 @@ def _execute_tool_call(env, tool_call, step_index):
     return step
 
 
-def _tool_message(tool_call, step):
+def _tool_message(tool_call, step, shopping_state=None):
     return {
         "role": "tool",
         "tool_call_id": tool_call.get("id"),
         "name": step["tool_name"],
-        "content": step["observation"],
+        "content": augment_current_observation(step["observation"], shopping_state)
+        if shopping_state is not None
+        else step["observation"],
     }
 
 

@@ -12,11 +12,12 @@
   context_window_tokens: 24576
   context_generation_reserve_tokens: 512
   context_safety_margin_tokens: 512
-  context_input_budget_tokens: 16384
+  context_input_budget_tokens: 23552
   context_preserve_recent_groups: 1
   context_compaction_enable: false
-  result_clearing_enable: true
+  result_clearing_enable: false
   result_keep_recent_groups: 3
+  context_policy_version: shopping-state-context-v1
   observation_token_budget: 1536
   observation_detail_token_budget: 4096
   observation_generic_token_budget: 768

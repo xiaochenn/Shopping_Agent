@@ -7,6 +7,7 @@ from pathlib import Path
 
 from shopping_grpo.evaluation.summary import summarize_trajectories
 from shopping_grpo.evaluation.rollout import OpenAIChatClient, collect_tasks, load_tasks
+from shopping_grpo.environment.shopping_state import CONTEXT_POLICY_VERSION
 
 
 def parse_args():
@@ -123,6 +124,7 @@ def main():
         [task["task_id"] for task in tasks], _read_jsonl(args.output)
     )
     summary["protocol"] = {
+        "context_policy_version": CONTEXT_POLICY_VERSION,
         "benchmark": str(args.benchmark),
         "model": args.model,
         "reward_contract": "shopsimulator-reward-v3",

@@ -180,15 +180,16 @@ def build_action_supervised_examples(
     result_clearing=False,
     result_keep_recent_groups=3,
     context_input_budget=None,
+    context_policy_version=None,
 ):
     """Build one tool-call target per turn under the rollout context policy.
 
     Each returned example ends at exactly one assistant tool call.  It therefore
     trains the same decision boundary used by an online agent: all preceding
     messages are context, and only the immediate next action receives loss.
-    When enabled, result clearing is applied to that *prefix* only after it
-    exceeds the online input budget.  No model call or mutable dataset is
-    involved, so the transform is deterministic and replayable for SFT.
+    ``shopping-state-context-v1`` clears all results older than the fixed recent
+    group count on every prefix.  The legacy budget-triggered transform remains
+    only for rows without this declared policy.
     """
 
     template = chat_template or tokenizer
@@ -199,6 +200,7 @@ def build_action_supervised_examples(
         raise ValueError("context_input_budget is required with result_clearing")
     if context_input_budget is not None and int(context_input_budget) < 1:
         raise ValueError("context_input_budget must be positive")
+    fixed_k_policy = context_policy_version == "shopping-state-context-v1"
 
     examples = []
     target_indices = [
@@ -220,7 +222,7 @@ def build_action_supervised_examples(
         except Exception:
             continue
 
-        if result_clearing and len(prefix_ids) > int(context_input_budget):
+        if fixed_k_policy or (result_clearing and len(prefix_ids) > int(context_input_budget)):
             prefix, clearing = clear_old_tool_results(
                 prefix,
                 keep_recent_groups=result_keep_recent_groups,
@@ -265,6 +267,7 @@ def build_action_supervised_examples(
                 "action_index": action_index,
                 "action_count": len(target_indices),
                 "cleared_tool_results": cleared_count,
+                "context_policy_version": context_policy_version,
             }
         )
     return examples
@@ -322,6 +325,7 @@ def load_supervised_examples(
                     result_clearing=result_clearing,
                     result_keep_recent_groups=result_keep_recent_groups,
                     context_input_budget=context_input_budget,
+                    context_policy_version=row.get("context_policy_version"),
                 )
                 stats["tool_action_targets"] += len(action_examples)
                 stats["cleared_action_targets"] += sum(

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
-import re
 from urllib.request import Request, urlopen
 
 
@@ -17,7 +16,6 @@ class ContextBudgetError(RuntimeError):
 
 
 RESULT_CLEARING_VERSION = "shopping-result-clearing-v1"
-_OBSERVATION_FIELD_PATTERN = re.compile(r"^([a-z_]+):\s*(.*)$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -43,28 +41,24 @@ class ToolResultClearingStats:
         return {"version": RESULT_CLEARING_VERSION, **asdict(self)}
 
 
-def tool_result_placeholder(tool_name, observation):
-    """Return a compact, non-actionable memory of an old tool result.
+def tool_result_placeholder(tool_name=None, observation=None):
+    """Return the fixed, non-actionable marker for a cleared result.
 
-    The original assistant tool call stays in history.  The replacement is a
-    valid tool response rather than an arbitrary token splice, and only keeps
-    stable facts that can help comparison later.  In particular it never
-    reproduces historic buttons or search-result ASIN lists, because neither is
-    a legal action target outside the latest observation.
+    Durable facts belong exclusively to ``ShoppingState``; the preceding
+    assistant message already retains the tool name and arguments.  Keeping
+    the marker deliberately data-free avoids a second, stale product memory.
+    The optional arguments remain for callers that replace a tool-message span.
     """
 
-    fields = _observation_fields(observation)
-    lines = [
+    del tool_name, observation
+    return "\n".join(
+        [
         "[SHOPPING_TOOL_RESULT_CLEARED_V1]",
-        f"tool: {tool_name or 'unknown'}",
-        "status: historical result cleared to satisfy the context budget.",
-        "The original tool call is retained. This record is historical and has no actionable buttons.",
-    ]
-    for key in ("query", "asin", "title", "brand", "category", "price", "selected_options", "key_attributes"):
-        value = fields.get(key)
-        if value:
-            lines.append(f"{key}: {_short_field(value)}")
-    return "\n".join(lines)
+        "Historical tool result removed from active context.",
+        "No buttons, page content, or actionable targets are available here.",
+        "Use [SHOPPING_STATE_V1] for historical facts; only the current tool result defines legal actions.",
+        ]
+    )
 
 
 def clear_old_tool_results(messages, keep_recent_groups=3):
@@ -110,21 +104,6 @@ def _tool_name_from_group(group):
     if len(calls) != 1:
         return "unknown"
     return str(((calls[0].get("function") or {}).get("name")) or "unknown")
-
-
-def _observation_fields(observation):
-    if not isinstance(observation, str):
-        return {}
-    return {
-        key: value.strip()
-        for key, value in _OBSERVATION_FIELD_PATTERN.findall(observation)
-        if value.strip()
-    }
-
-
-def _short_field(value, limit=240):
-    value = " ".join(str(value).split())
-    return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
 def compact_chat_messages(messages, tools, count_tokens, max_input_tokens):

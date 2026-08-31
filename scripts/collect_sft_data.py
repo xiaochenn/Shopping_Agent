@@ -28,6 +28,7 @@ from shopping_grpo.evaluation.rollout import (
     load_tasks,
     rollout_interrupted,
 )
+from shopping_grpo.environment.shopping_state import CONTEXT_POLICY_VERSION
 
 
 def batch_paths(output_dir: Path) -> dict[str, Path]:
@@ -360,6 +361,7 @@ def _collection_config(args: argparse.Namespace) -> dict:
     """Record reproducibility settings without ever serializing the API key."""
 
     return {
+        "context_policy_version": CONTEXT_POLICY_VERSION,
         "tasks": str(args.tasks),
         "held_out_tasks": str(args.held_out_tasks),
         "model": args.model,

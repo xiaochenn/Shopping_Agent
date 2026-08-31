@@ -224,9 +224,9 @@ class SftTrainingTest(unittest.TestCase):
             tools=[],
             tokenizer=CharacterTokenizer(),
             max_length=2_000,
-            result_clearing=True,
+            result_clearing=False,
             result_keep_recent_groups=1,
-            context_input_budget=300,
+            context_policy_version="shopping-state-context-v1",
         )
 
         self.assertEqual(len(examples), 3)

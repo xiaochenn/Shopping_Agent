@@ -32,7 +32,7 @@ class FakeEnv:
         self.actions.append(action)
         if action == "search[乳胶枕]":
             return {
-                "instruction": "results [SEP] 100000000001 [SEP] 乳胶枕",
+                "instruction": "[SHOPPING_OBSERVATION_V2]\n1|100000000001|99|品牌|类目|乳胶|乳胶枕\n可点击的按钮: [\"100000000001\"]",
                 "reward": 0.0,
                 "done": False,
             }
@@ -84,7 +84,7 @@ class GuardRecoveryEnv(FakeEnv):
         self.actions.append(action)
         if action == "search[乳胶枕]":
             return {
-                "instruction": "results [SEP] 100000000001 [SEP] 乳胶枕",
+                "instruction": "[SHOPPING_OBSERVATION_V2]\n1|100000000001|99|品牌|类目|乳胶|乳胶枕\n可点击的按钮: [\"100000000001\"]",
                 "reward": 0.0,
                 "done": False,
             }
@@ -275,7 +275,7 @@ class RolloutTest(unittest.TestCase):
             def step(self, action):
                 self.actions.append(action)
                 if action == "search[乳胶枕]":
-                    return {"instruction": "results [SEP] 100000000001", "reward": 0.0, "done": False}
+                    return {"instruction": "[SHOPPING_OBSERVATION_V2]\n1|100000000001|99|品牌|类目|乳胶|乳胶枕\n可点击的按钮: [\"100000000001\"]", "reward": 0.0, "done": False}
                 if action == "click[100000000001]":
                     return {
                         "instruction": 'detail\n\n可点击的按钮: ["满天星", "Description", "Buy Now"]',
@@ -334,7 +334,7 @@ class RolloutTest(unittest.TestCase):
             def step(self, action):
                 self.actions.append(action)
                 if action == "search[乳胶枕]":
-                    return {"instruction": "results [SEP] 100000000001", "reward": 0.0, "done": False}
+                    return {"instruction": "[SHOPPING_OBSERVATION_V2]\n1|100000000001|99|品牌|类目|乳胶|乳胶枕\n可点击的按钮: [\"100000000001\"]", "reward": 0.0, "done": False}
                 if action == "click[100000000001]":
                     return {
                         "instruction": 'detail\n\n可点击的按钮: ["满天星", "Buy Now"]',
@@ -377,6 +377,41 @@ class RolloutTest(unittest.TestCase):
         ]
         self.assertIn("view_description", exposed_after_selection)
         self.assertIn("search_products", exposed_after_selection)
+
+    def test_collect_for_task_uses_fixed_three_recent_full_results(self):
+        """第五次决策时，第一份工具结果已是极简占位符，最新页仍完整。"""
+        class FiveStepEnv(FakeEnv):
+            def step(self, action):
+                self.actions.append(action)
+                if action == "search[乳胶枕]":
+                    return {"instruction": "1|100000000001|99|品牌|类目|乳胶|乳胶枕\n可点击的按钮: [\"100000000001\"]", "reward": 0.0, "done": False}
+                if action == "click[100000000001]":
+                    return {"instruction": 'asin: 100000000001\n可点击的按钮: ["features", "buy now"]', "reward": 0.0, "done": False}
+                if action == "click[Features]":
+                    return {"instruction": 'asin: 100000000001\n可点击的按钮: ["< prev"]', "reward": 0.0, "done": False}
+                if action == "click[< Prev]":
+                    return {"instruction": 'asin: 100000000001\n可点击的按钮: ["buy now"]', "reward": 0.0, "done": False}
+                if action == "click[Buy Now]":
+                    return {"instruction": "done", "reward": 1.0, "done": True, "over": True}
+                raise AssertionError(action)
+
+        client = MockClient(
+            [
+                assistant_tool("search_products", {"query": "乳胶枕"}, "search"),
+                assistant_tool("open_product", {"asin": "100000000001"}, "open"),
+                assistant_tool("view_features", {}, "features"),
+                assistant_tool("prev_page", {}, "prev"),
+                assistant_tool("buy_now", {}, "buy"),
+            ]
+        )
+        trajectory = collect_for_task({"task_id": 14}, client=client, env_factory=FiveStepEnv)
+
+        self.assertEqual(trajectory["status"], "done")
+        fifth_prompt = client.requests[4]["messages"]
+        self.assertIn("[SHOPPING_TOOL_RESULT_CLEARED_V1]", fifth_prompt[3]["content"])
+        self.assertNotIn("100000000001|99", fifth_prompt[3]["content"])
+        self.assertIn("[SHOPPING_STATE_V1]", fifth_prompt[-1]["content"])
+        self.assertEqual(trajectory["context_trace"][4]["cleared_tool_results"], 1)
 
     def test_collect_for_task_allows_recovery_after_separated_guard_rejections(self):
         """合法动作应重置守卫计数，避免累计三次历史点击提前中止。"""

@@ -55,7 +55,7 @@ class ChatContextWindowTest(unittest.TestCase):
         self.assertEqual(cleared[2], assistant("old"))
         self.assertEqual(cleared[4], assistant("latest"))
         self.assertIn("[SHOPPING_TOOL_RESULT_CLEARED_V1]", cleared[3]["content"])
-        self.assertIn("asin: 123", cleared[3]["content"])
+        self.assertNotIn("asin: 123", cleared[3]["content"])
         self.assertNotIn('"buy now"', cleared[3]["content"])
         self.assertEqual(cleared[5]["content"], "latest page with the current actionable buttons")
         self.assertIn('"buy now"', messages[3]["content"])
@@ -65,8 +65,8 @@ class ChatContextWindowTest(unittest.TestCase):
             "search_products",
             "[SHOPPING_OBSERVATION_V2]\nquery: red shoes\n可点击的按钮: [\"123\", \"next >\"]",
         )
-        self.assertIn("query: red shoes", placeholder)
-        self.assertIn("no actionable buttons", placeholder)
+        self.assertNotIn("query: red shoes", placeholder)
+        self.assertIn("No buttons, page content, or actionable targets", placeholder)
         self.assertNotIn("next >", placeholder)
 
     def test_keeps_fixed_prompt_and_largest_recent_complete_group_suffix(self):

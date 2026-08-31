@@ -92,6 +92,7 @@ def build_sft_row(trajectory: dict) -> dict:
     return {
         "trajectory_id": trajectory.get("trajectory_id"),
         "task_id": int(trajectory["task_id"]),
+        "context_policy_version": trajectory.get("context_policy_version"),
         "messages": _training_messages(
             trajectory.get("messages") or [],
             blocked_call_ids,
