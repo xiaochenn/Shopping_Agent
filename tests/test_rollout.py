@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from http.client import RemoteDisconnected
 from pathlib import Path
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
 from shopping_grpo.environment.actions import action_guard_tool_message
@@ -731,6 +731,28 @@ class RolloutTest(unittest.TestCase):
         client.complete([{"role": "user", "content": "hi"}], tools=[])
 
         self.assertEqual(captured["payload"]["max_tokens"], 256)
+
+    def test_openai_client_retries_transient_http_status(self):
+        calls = []
+
+        def transport(url, payload, headers, timeout):
+            calls.append((url, payload))
+            if len(calls) == 1:
+                raise HTTPError(url, 503, "temporarily unavailable", {}, None)
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+        client = OpenAIChatClient(
+            model="deepseek-v4-flash",
+            base_url="https://api.example.test/v1",
+            api_key="secret",
+            completion_retries=1,
+            retry_delay_seconds=0,
+            transport=transport,
+        )
+
+        message = client.complete([{"role": "user", "content": "hi"}], [])
+        self.assertEqual(message["content"], "ok")
+        self.assertEqual(len(calls), 2)
 
     def test_openai_client_compacts_old_complete_tool_groups_before_request(self):
         captured = {}

@@ -10,7 +10,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from http.client import RemoteDisconnected
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from pathlib import Path
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -50,6 +50,7 @@ SYSTEM_PROMPT = """你是一个购物 Agent，负责在 ShopSimulator 中替用�
 MAX_BLOCKED_TOOL_CALLS = 3
 MODEL_COMPLETION_RETRIES = 2
 MODEL_RETRY_DELAY_SECONDS = 1
+RETRYABLE_MODEL_HTTP_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504})
 
 
 def rollout_interrupted(signum, frame):
@@ -79,6 +80,8 @@ class OpenAIChatClient:
         observation_detail_token_budget=4096,
         observation_generic_token_budget=768,
         observation_search_top_k=20,
+        completion_retries=MODEL_COMPLETION_RETRIES,
+        retry_delay_seconds=MODEL_RETRY_DELAY_SECONDS,
         token_counter=None,
         observation_token_counter=None,
         transport=None,
@@ -90,6 +93,12 @@ class OpenAIChatClient:
         self.temperature = float(temperature)
         self.top_p = float(top_p)
         self.timeout = timeout
+        self.completion_retries = int(completion_retries)
+        self.retry_delay_seconds = float(retry_delay_seconds)
+        if self.completion_retries < 0:
+            raise ValueError("completion_retries cannot be negative")
+        if self.retry_delay_seconds < 0:
+            raise ValueError("retry_delay_seconds cannot be negative")
         self.max_tokens = int(max_tokens)
         if self.max_tokens < 1:
             raise ValueError("max_tokens must be positive")
@@ -227,7 +236,7 @@ class OpenAIChatClient:
             "User-Agent": "shopping-grpo-longhorizon/0.1",
         }
         url = self.base_url if self.responses_api else f"{self.base_url}/chat/completions"
-        for attempt in range(MODEL_COMPLETION_RETRIES + 1):
+        for attempt in range(self.completion_retries + 1):
             try:
                 if self.transport is not None:
                     response = self.transport(url, payload, headers, self.timeout)
@@ -241,10 +250,17 @@ class OpenAIChatClient:
                     with urlopen(request, timeout=self.timeout) as raw:
                         response = json.loads(raw.read().decode("utf-8"))
                 return _response_message(response, responses_api=self.responses_api)
-            except (RemoteDisconnected, TimeoutError, URLError):
-                if attempt >= MODEL_COMPLETION_RETRIES:
+            except HTTPError as exc:
+                if (
+                    exc.code not in RETRYABLE_MODEL_HTTP_STATUSES
+                    or attempt >= self.completion_retries
+                ):
                     raise
-                time.sleep(MODEL_RETRY_DELAY_SECONDS * (attempt + 1))
+                time.sleep(self.retry_delay_seconds * (2**attempt))
+            except (RemoteDisconnected, TimeoutError, URLError):
+                if attempt >= self.completion_retries:
+                    raise
+                time.sleep(self.retry_delay_seconds * (2**attempt))
 
     def project_observation(self, tool_name, observation, parameters=None):
         if self.observation_token_budget is None:
@@ -494,10 +510,15 @@ def collect_tasks(
     max_steps=30,
     env_factory=ShopAgentEnv,
     attempts_per_task=1,
+    transient_task_retries=0,
+    transient_task_retry_delay_seconds=0,
 ):
     attempts_per_task = int(attempts_per_task)
     if attempts_per_task < 1:
         raise ValueError("attempts_per_task must be at least 1")
+    transient_task_retries = int(transient_task_retries)
+    if transient_task_retries < 0:
+        raise ValueError("transient_task_retries cannot be negative")
     done = completed_task_attempts(output_path)
     written = []
     for task in tasks:
@@ -505,14 +526,23 @@ def collect_tasks(
         for attempt_index in range(attempts_per_task):
             if (task_id, attempt_index) in done:
                 continue
-            trajectory = collect_for_task(
-                task,
-                client=client,
-                env_factory=env_factory,
-                base_url=base_url,
-                max_steps=max_steps,
-                attempt_index=attempt_index,
-            )
+            for retry_index in range(transient_task_retries + 1):
+                trajectory = collect_for_task(
+                    task,
+                    client=client,
+                    env_factory=env_factory,
+                    base_url=base_url,
+                    max_steps=max_steps,
+                    attempt_index=attempt_index,
+                )
+                if not _is_retryable_model_transport_failure(trajectory):
+                    break
+                if retry_index >= transient_task_retries:
+                    break
+                if transient_task_retry_delay_seconds:
+                    time.sleep(
+                        float(transient_task_retry_delay_seconds) * (2**retry_index)
+                    )
             append_jsonl(output_path, [trajectory])
             written.append(trajectory)
             if _is_infrastructure_failure(trajectory):
@@ -520,6 +550,23 @@ def collect_tasks(
                     "collection infrastructure failure; stopped before the next task"
                 )
     return written
+
+
+def _is_retryable_model_transport_failure(trajectory):
+    """A model transport failure is safe to replay after a clean lease release.
+
+    ShopSimulator request/release failures may leave server-side state unknown and
+    therefore remain batch-stopping infrastructure failures.
+    """
+
+    if trajectory.get("release_error"):
+        return False
+    error = trajectory.get("error") or {}
+    return error.get("type") in {
+        URLError.__name__,
+        RemoteDisconnected.__name__,
+        TimeoutError.__name__,
+    }
 
 
 def _is_infrastructure_failure(trajectory):

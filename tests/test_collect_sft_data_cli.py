@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.collect_sft_data import (
+    _is_retryable_model_transport_failure,
     _validate_args,
     batch_paths,
     collect_until_target,
@@ -130,6 +131,33 @@ class CollectSftDataCliTests(unittest.TestCase):
 
         self.assertEqual(len(clients), 2)
         self.assertEqual(len({row["client_id"] for row in written}), 2)
+
+    def test_target_collection_replays_a_transient_model_failure(self):
+        rows = [
+            {"trajectory_id": "timeout", "task_id": 1, "error": {"type": "TimeoutError"}},
+            {"trajectory_id": "recovered", "task_id": 1},
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir, patch(
+            "scripts.collect_sft_data.collect_for_task", side_effect=rows
+        ) as collect, patch(
+            "scripts.collect_sft_data.acceptance_reasons", return_value=(True, [])
+        ):
+            written, accepted = collect_until_target(
+                tasks=[{"task_id": 1}],
+                target_accepted=1,
+                client=object(),
+                output_path=Path(tmpdir) / "raw.jsonl",
+                base_url="http://shop.test",
+                max_steps=35,
+                attempts_per_task=1,
+                workers=1,
+                transient_task_retries=1,
+            )
+
+        self.assertEqual([row["trajectory_id"] for row in written], ["recovered"])
+        self.assertEqual(accepted, 1)
+        self.assertEqual(collect.call_count, 2)
+        self.assertTrue(_is_retryable_model_transport_failure(rows[0]))
 
 
 if __name__ == "__main__":

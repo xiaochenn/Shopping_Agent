@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import signal
+import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from shopping_grpo.collection.sft import (
 from shopping_grpo.evaluation.rollout import (
     CollectionInfrastructureError,
     OpenAIChatClient,
+    _is_retryable_model_transport_failure,
     _is_infrastructure_failure,
     append_jsonl,
     collect_for_task,
@@ -77,6 +79,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--timeout", type=int, default=180)
+    parser.add_argument(
+        "--completion-retries",
+        type=int,
+        default=4,
+        help="Retries for one transient model completion before replaying its task.",
+    )
+    parser.add_argument("--retry-delay-seconds", type=float, default=2.0)
+    parser.add_argument(
+        "--transient-task-retries",
+        type=int,
+        default=2,
+        help="Fresh-rollout retries after a model transport failure and clean release.",
+    )
+    parser.add_argument("--transient-task-retry-delay-seconds", type=float, default=5.0)
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--max-steps", type=int, default=35)
     parser.add_argument("--thinking", action="store_true")
@@ -110,6 +126,8 @@ def collect_until_target(
     attempts_per_task,
     workers=1,
     excluded_task_ids=(),
+    transient_task_retries=0,
+    transient_task_retry_delay_seconds=0,
 ):
     """Collect concurrently without scheduling more possible successes than needed."""
 
@@ -128,6 +146,24 @@ def collect_until_target(
     pending = {}
     written = []
     infrastructure_failed = False
+    if int(transient_task_retries) < 0:
+        raise ValueError("transient_task_retries cannot be negative")
+
+    def run_task(task, attempt_index):
+        for retry_index in range(int(transient_task_retries) + 1):
+            trajectory = collect_for_task(
+                task,
+                client=client_factory() if client_factory else client,
+                base_url=base_url,
+                max_steps=max_steps,
+                attempt_index=attempt_index,
+            )
+            if not _is_retryable_model_transport_failure(trajectory):
+                return trajectory
+            if retry_index >= int(transient_task_retries):
+                return trajectory
+            if transient_task_retry_delay_seconds:
+                time.sleep(float(transient_task_retry_delay_seconds) * (2**retry_index))
 
     def submit_available(executor):
         remaining = int(target_accepted) - accepted
@@ -137,14 +173,7 @@ def collect_until_target(
                 task, attempt_index = next(candidate_iter)
             except StopIteration:
                 return
-            future = executor.submit(
-                collect_for_task,
-                task,
-                client=client_factory() if client_factory else client,
-                base_url=base_url,
-                max_steps=max_steps,
-                attempt_index=attempt_index,
-            )
+            future = executor.submit(run_task, task, attempt_index)
             pending[future] = (task, attempt_index)
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -196,6 +225,14 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--workers must be at least 1")
     if args.workers > 1 and args.target_accepted is None:
         raise SystemExit("--workers > 1 requires --target-accepted")
+    if args.completion_retries < 0:
+        raise SystemExit("--completion-retries cannot be negative")
+    if args.retry_delay_seconds < 0:
+        raise SystemExit("--retry-delay-seconds cannot be negative")
+    if args.transient_task_retries < 0:
+        raise SystemExit("--transient-task-retries cannot be negative")
+    if args.transient_task_retry_delay_seconds < 0:
+        raise SystemExit("--transient-task-retry-delay-seconds cannot be negative")
     if args.context_input_budget < 0:
         raise SystemExit("--context-input-budget cannot be negative")
     if args.context_window and args.context_input_budget and args.context_input_budget > (
@@ -222,6 +259,8 @@ def _make_client(args: argparse.Namespace) -> OpenAIChatClient:
         temperature=args.temperature,
         top_p=args.top_p,
         timeout=args.timeout,
+        completion_retries=args.completion_retries,
+        retry_delay_seconds=args.retry_delay_seconds,
         max_tokens=args.max_tokens,
         thinking=args.thinking,
         reasoning_effort=args.reasoning_effort,
@@ -254,6 +293,10 @@ def _collection_config(args: argparse.Namespace) -> dict:
         "temperature": args.temperature,
         "top_p": args.top_p,
         "timeout": args.timeout,
+        "completion_retries": args.completion_retries,
+        "retry_delay_seconds": args.retry_delay_seconds,
+        "transient_task_retries": args.transient_task_retries,
+        "transient_task_retry_delay_seconds": args.transient_task_retry_delay_seconds,
         "max_tokens": args.max_tokens,
         "max_steps": args.max_steps,
         "thinking": args.thinking,
@@ -300,6 +343,8 @@ def main() -> int:
                     base_url=args.base_url,
                     max_steps=args.max_steps,
                     attempts_per_task=args.attempts_per_task,
+                    transient_task_retries=args.transient_task_retries,
+                    transient_task_retry_delay_seconds=args.transient_task_retry_delay_seconds,
                 )
                 print(f"collected_raw={len(written)}")
             else:
@@ -314,6 +359,8 @@ def main() -> int:
                     attempts_per_task=args.attempts_per_task,
                     workers=args.workers,
                     excluded_task_ids=held_out_ids,
+                    transient_task_retries=args.transient_task_retries,
+                    transient_task_retry_delay_seconds=args.transient_task_retry_delay_seconds,
                 )
                 print(f"collected_raw={len(written)} accepted_total={accepted}")
         except CollectionInfrastructureError as exc:
